@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Group-based medication care web app",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "dev:server": "pnpm --filter @pillmate/server dev",
     "dev:web": "pnpm --filter @pillmate/web dev",
     "build": "pnpm --filter @pillmate/server build",

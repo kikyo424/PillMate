@@ -53,7 +53,22 @@ uploads/                  사진 인증 업로드 파일
 pnpm install
 ```
 
-SQLite 테이블을 생성하거나 갱신합니다.
+SQLite 테이블 생성/갱신, API 서버 실행, 웹앱 실행을 한 번에 처리합니다.
+
+```bash
+pnpm dev
+```
+
+실행 후 아래 주소로 접속합니다.
+
+```text
+웹앱: http://localhost:5173
+API 서버: http://localhost:4000
+```
+
+필요하면 각 작업을 따로 실행할 수도 있습니다.
+
+SQLite 테이블만 생성하거나 갱신합니다.
 
 ```bash
 pnpm db:init
