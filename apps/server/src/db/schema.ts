@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS intake_logs (
   status TEXT CHECK(status IN ('PENDING', 'COMPLETED', 'MISSED', 'SKIPPED')) DEFAULT 'PENDING',
   verification_type TEXT CHECK(verification_type IN ('BUTTON', 'PHOTO')) NULL,
   photo_url TEXT NULL,
+  notification_sent_at TEXT NULL,
+  escalated_at TEXT NULL,
   completed_at TEXT NULL,
   FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
   FOREIGN KEY (target_user_id) REFERENCES users(id) ON DELETE CASCADE,

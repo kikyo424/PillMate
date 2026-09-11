@@ -1,6 +1,6 @@
-import { db, getDatabasePath } from "./connection.js";
-import { schemaSql } from "./schema.js";
+import { getDatabasePath } from "./connection.js";
+import { applyMigrations } from "./migrations.js";
 
-db.exec(schemaSql);
+applyMigrations();
 
 console.log(`PillMate SQLite schema is ready: ${getDatabasePath()}`);

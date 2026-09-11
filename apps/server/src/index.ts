@@ -3,12 +3,13 @@ import express from "express";
 import http from "node:http";
 import { Server } from "socket.io";
 import { config } from "./config.js";
-import { db, getDatabasePath } from "./db/connection.js";
-import { schemaSql } from "./db/schema.js";
+import { getDatabasePath } from "./db/connection.js";
+import { applyMigrations } from "./db/migrations.js";
 import { errorHandler } from "./http/errors.js";
 import { createApiRouter } from "./routes/api.js";
+import { startMedicationScheduler } from "./services/scheduler.js";
 
-db.exec(schemaSql);
+applyMigrations();
 
 const app = express();
 const server = http.createServer(app);
@@ -36,10 +37,16 @@ app.use("/api", createApiRouter(io));
 app.use(errorHandler);
 
 io.on("connection", (socket) => {
+  socket.on("user:join", (userId: number | string) => {
+    socket.join(`user:${userId}`);
+  });
+
   socket.on("group:join", (groupId: number | string) => {
     socket.join(`group:${groupId}`);
   });
 });
+
+startMedicationScheduler(io);
 
 server.listen(config.port, () => {
   console.log(`PillMate server listening on http://localhost:${config.port}`);

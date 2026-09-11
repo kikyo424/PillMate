@@ -69,3 +69,43 @@ POST   /api/groups/:groupId/messages
 Schedule writes require group owner access or `can_edit_schedule = 1`.
 Medication completion is restricted to the schedule's target user. Photo
 verification is accepted as multipart form data with the `photo` file field.
+
+## Step 3: Scheduler, Realtime, and Push
+
+The server starts a `node-cron` job every minute. It creates pending intake logs
+for due schedules, sends a personal `intake:due` Socket.io event to
+`user:{targetUserId}`, and escalates still-pending logs after
+`ESCALATION_MINUTES`.
+
+Socket.io rooms:
+
+```text
+user:join   joins user:{userId}
+group:join  joins group:{groupId}
+```
+
+Realtime events:
+
+```text
+intake:due
+intake:completed
+intake:escalated
+chat:message
+```
+
+Web Push is optional. Store a browser subscription with:
+
+```text
+POST   /api/me/push-subscription
+DELETE /api/me/push-subscription
+```
+
+Set `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY` to enable actual browser push
+delivery. Without VAPID keys, realtime Socket.io events and feed messages still
+work normally.
+
+For development, an authenticated user can manually run one scheduler pass:
+
+```text
+POST /api/scheduler/tick
+```

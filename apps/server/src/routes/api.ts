@@ -4,7 +4,7 @@ import path from "node:path";
 import multer from "multer";
 import type { Server } from "socket.io";
 import { db, runTransaction } from "../db/connection.js";
-import type { GroupRow, ScheduleRow, UserRow } from "../db/types.js";
+import type { GroupRow, ScheduleRow } from "../db/types.js";
 import { asyncHandler, HttpError } from "../http/errors.js";
 import type { AuthedRequest } from "../http/request.js";
 import {
@@ -15,6 +15,9 @@ import {
   requireScheduleEditor
 } from "../middleware/auth.js";
 import { buildScheduledTime, getTodayCode } from "../utils/dates.js";
+import { createSystemFeedMessage } from "../services/feed.js";
+import { sendPushToGroup } from "../services/notifications.js";
+import { runMedicationSchedulerTick } from "../services/scheduler.js";
 import { createInviteCode } from "../utils/inviteCode.js";
 import { hashPassword } from "../utils/password.js";
 import {
@@ -96,22 +99,7 @@ function createVerificationFeed(
       ? `${user.name}님이 사진으로 복약을 인증했습니다.`
       : `${user.name}님이 복약을 완료했습니다.`;
 
-  const result = db
-    .prepare(
-      `INSERT INTO chat_messages (group_id, sender_id, message_type, content, photo_url)
-       VALUES (?, NULL, 'SYSTEM_VERIFICATION', ?, ?)`
-    )
-    .run(schedule.group_id, content, photoUrl);
-
-  const message = db
-    .prepare(
-      `SELECT id, group_id, sender_id, message_type, content, photo_url, created_at
-       FROM chat_messages
-       WHERE id = ?`
-    )
-    .get(Number(result.lastInsertRowid));
-
-  io.to(`group:${schedule.group_id}`).emit("chat:message", message);
+  return createSystemFeedMessage(io, schedule.group_id, content, photoUrl);
 }
 
 export function createApiRouter(io: Server) {
@@ -119,7 +107,7 @@ export function createApiRouter(io: Server) {
 
   router.post(
     "/users",
-    asyncHandler((req, res) => {
+    asyncHandler(async (req, res) => {
       const email = requireEmail(req.body.email);
       const password = requireString(req.body.password, "password");
       const name = requireString(req.body.name, "name");
@@ -142,8 +130,37 @@ export function createApiRouter(io: Server) {
   router.get(
     "/me",
     requireAuth,
-    asyncHandler((req, res) => {
+    asyncHandler(async (req, res) => {
       res.json({ user: (req as AuthedRequest).user });
+    })
+  );
+
+  router.post(
+    "/me/push-subscription",
+    requireAuth,
+    asyncHandler((req, res) => {
+      const authedReq = req as AuthedRequest;
+
+      if (!req.body || typeof req.body !== "object") {
+        throw new HttpError(400, "Push subscription body is required");
+      }
+
+      db.prepare("UPDATE users SET push_subscription = ? WHERE id = ?").run(
+        JSON.stringify(req.body),
+        authedReq.user.id
+      );
+
+      res.status(204).send();
+    })
+  );
+
+  router.delete(
+    "/me/push-subscription",
+    requireAuth,
+    asyncHandler((req, res) => {
+      const authedReq = req as AuthedRequest;
+      db.prepare("UPDATE users SET push_subscription = NULL WHERE id = ?").run(authedReq.user.id);
+      res.status(204).send();
     })
   );
 
@@ -385,7 +402,7 @@ export function createApiRouter(io: Server) {
     "/schedules/:scheduleId/complete",
     requireAuth,
     upload.single("photo"),
-    asyncHandler((req, res) => {
+    asyncHandler(async (req, res) => {
       const authedReq = req as AuthedRequest;
       const scheduleId = requireInt(req.params.scheduleId, "scheduleId");
       const schedule = getSchedule(scheduleId);
@@ -437,7 +454,32 @@ export function createApiRouter(io: Server) {
         return intakeLog;
       });
 
-      res.json({ intake_log: completeLog() });
+      const intakeLog = completeLog();
+
+      await sendPushToGroup(schedule.group_id, {
+        title: "복약 완료",
+        body: `${authedReq.user.name}님이 복약을 완료했습니다.`,
+        kind: "INTAKE_COMPLETED",
+        url: "/"
+      });
+
+      io.to(`group:${schedule.group_id}`).emit("intake:completed", {
+        intake_log: intakeLog,
+        schedule_id: schedule.id,
+        group_id: schedule.group_id,
+        target_user_id: schedule.target_user_id
+      });
+
+      res.json({ intake_log: intakeLog });
+    })
+  );
+
+  router.post(
+    "/scheduler/tick",
+    requireAuth,
+    asyncHandler(async (_req, res) => {
+      const result = await runMedicationSchedulerTick(io);
+      res.json(result);
     })
   );
 
