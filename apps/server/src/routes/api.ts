@@ -14,7 +14,7 @@ import {
   requireGroupOwner,
   requireScheduleEditor
 } from "../middleware/auth.js";
-import { buildScheduledTime, getTodayCode } from "../utils/dates.js";
+import { buildScheduledTime, getLocalDayBounds, getTodayCode } from "../utils/dates.js";
 import { createSystemFeedMessage } from "../services/feed.js";
 import { sendPushToGroup } from "../services/notifications.js";
 import { runMedicationSchedulerTick } from "../services/scheduler.js";
@@ -193,6 +193,26 @@ export function createApiRouter(io: Server) {
     })
   );
 
+  router.get(
+    "/groups",
+    requireAuth,
+    asyncHandler((req, res) => {
+      const authedReq = req as AuthedRequest;
+      const groups = db
+        .prepare(
+          `SELECT g.id, g.name, g.owner_id, g.invite_code, g.created_at,
+                  gm.role, gm.can_edit_schedule
+           FROM groups g
+           JOIN group_members gm ON gm.group_id = g.id
+           WHERE gm.user_id = ?
+           ORDER BY g.created_at DESC`
+        )
+        .all(authedReq.user.id);
+
+      res.json({ groups });
+    })
+  );
+
   router.post(
     "/groups/join",
     requireAuth,
@@ -297,16 +317,23 @@ export function createApiRouter(io: Server) {
       const groupId = requireInt(req.params.groupId, "groupId");
       const today = req.query.date ? new Date(String(req.query.date)) : new Date();
       const todayCode = getTodayCode(today);
+      const dayBounds = getLocalDayBounds(today);
       const schedules = db
         .prepare(
           `SELECT s.id, s.group_id, s.target_user_id, s.medicine_name, s.dosage, s.intake_time,
-                  s.days_of_week, s.is_active, s.created_at, u.name AS target_user_name
+                  s.days_of_week, s.is_active, s.created_at, u.name AS target_user_name,
+                  il.id AS intake_log_id, il.status, il.verification_type, il.photo_url,
+                  il.completed_at, il.scheduled_time
            FROM schedules s
            JOIN users u ON u.id = s.target_user_id
+           LEFT JOIN intake_logs il
+             ON il.schedule_id = s.id
+            AND il.scheduled_time >= ?
+            AND il.scheduled_time < ?
            WHERE s.group_id = ? AND s.is_active = 1 AND instr(',' || s.days_of_week || ',', ',' || ? || ',') > 0
            ORDER BY s.intake_time ASC`
         )
-        .all(groupId, todayCode);
+        .all(dayBounds.start, dayBounds.end, groupId, todayCode);
 
       res.json({ schedules, date: today.toISOString(), day: todayCode });
     })
@@ -427,6 +454,7 @@ export function createApiRouter(io: Server) {
           : buildScheduledTime(new Date(), schedule.intake_time);
       const photoUrl = req.file ? `/uploads/intake-verifications/${req.file.filename}` : null;
       const verificationType = photoUrl ? "PHOTO" : "BUTTON";
+      const completedAt = new Date().toISOString();
 
       const completeLog = () =>
         runTransaction(() => {
@@ -437,9 +465,9 @@ export function createApiRouter(io: Server) {
 
         db.prepare(
           `UPDATE intake_logs
-           SET status = 'COMPLETED', verification_type = ?, photo_url = ?, completed_at = CURRENT_TIMESTAMP
+           SET status = 'COMPLETED', verification_type = ?, photo_url = ?, completed_at = ?
            WHERE schedule_id = ? AND scheduled_time = ?`
-        ).run(verificationType, photoUrl, schedule.id, scheduledTime);
+        ).run(verificationType, photoUrl, completedAt, schedule.id, scheduledTime);
 
         const intakeLog = db
           .prepare(

@@ -39,6 +39,14 @@ pnpm dev:server
 
 The server defaults to `http://localhost:4000`.
 
+Start the web app:
+
+```bash
+pnpm dev:web
+```
+
+The web app defaults to `http://localhost:5173`.
+
 ## Step 2: Backend API
 
 During early development, authenticated API calls use an `x-user-id` request
@@ -109,3 +117,20 @@ For development, an authenticated user can manually run one scheduler pass:
 ```text
 POST /api/scheduler/tick
 ```
+
+## Step 4: React Web App
+
+The Vite React app lives in `apps/web`.
+
+Implemented screens:
+
+```text
+Onboarding            development user creation
+Group setup           create a family ring or join by invite code
+Today                 medication cards with one-touch and camera verification
+Family chat           realtime text messages and verification feed cards
+Schedule management   owner/editor schedule creation and member permissions
+```
+
+Mobile uses a bottom tab bar. Desktop shows the medication dashboard and chat
+panel side by side.

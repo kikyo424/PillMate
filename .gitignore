@@ -3,6 +3,7 @@ node_modules/
 dist/
 .env
 *.log
+*.tsbuildinfo
 data/*.sqlite
 data/*.sqlite-*
 uploads/

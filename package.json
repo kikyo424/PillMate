@@ -5,7 +5,10 @@
   "description": "Group-based medication care web app",
   "scripts": {
     "dev:server": "pnpm --filter @pillmate/server dev",
+    "dev:web": "pnpm --filter @pillmate/web dev",
     "build": "pnpm --filter @pillmate/server build",
+    "build:web": "pnpm --filter @pillmate/web build",
+    "build:all": "pnpm --filter @pillmate/server build && pnpm --filter @pillmate/web build",
     "db:init": "pnpm --filter @pillmate/server db:init"
   },
   "workspaces": [
