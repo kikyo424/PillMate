@@ -49,9 +49,6 @@ uploads/                  사진 인증 업로드 파일
 
 의존성을 설치합니다.
 
-```bash
-pnpm install
-```
 
 SQLite 테이블 생성/갱신, API 서버 실행, 웹앱 실행을 한 번에 처리합니다.
 
