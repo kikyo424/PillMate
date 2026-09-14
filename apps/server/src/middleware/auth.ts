@@ -1,39 +1,85 @@
 import type { NextFunction, Request, Response } from "express";
+import { fromNodeHeaders } from "better-auth/node";
+import { auth } from "../auth.js";
 import { db } from "../db/connection.js";
 import type { GroupMemberRow, UserRow } from "../db/types.js";
 import { HttpError } from "../http/errors.js";
 
-export function requireAuth(req: Request, _res: Response, next: NextFunction) {
+function getOrCreateAppUser(authUser: { email: string; name?: string | null }) {
+  const existingUser = db
+    .prepare("SELECT id, email, name, password_hash, push_subscription, created_at FROM users WHERE email = ?")
+    .get(authUser.email) as UserRow | undefined;
+
+  if (existingUser) {
+    return existingUser;
+  }
+
+  const result = db
+    .prepare("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)")
+    .run(authUser.email, "better-auth", authUser.name?.trim() || authUser.email);
+
+  return db
+    .prepare("SELECT id, email, name, password_hash, push_subscription, created_at FROM users WHERE id = ?")
+    .get(Number(result.lastInsertRowid)) as UserRow;
+}
+
+export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const rawUserId = req.header("x-user-id");
   const userId = Number(rawUserId);
 
-  if (!rawUserId || !Number.isInteger(userId) || userId <= 0) {
-    next(new HttpError(401, "x-user-id header is required for development auth"));
+  if (rawUserId) {
+    if (!Number.isInteger(userId) || userId <= 0) {
+      next(new HttpError(401, "Valid x-user-id header is required"));
+      return;
+    }
+
+    const user = db
+      .prepare("SELECT id, email, name, password_hash, push_subscription, created_at FROM users WHERE id = ?")
+      .get(userId) as UserRow | undefined;
+
+    if (!user) {
+      next(new HttpError(401, "Authenticated user was not found"));
+      return;
+    }
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      name: user.name
+    };
+
+    next();
     return;
   }
 
-  const user = db
-    .prepare("SELECT id, email, name, password_hash, push_subscription, created_at FROM users WHERE id = ?")
-    .get(userId) as UserRow | undefined;
+  try {
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers)
+    });
 
-  if (!user) {
-    next(new HttpError(401, "Authenticated user was not found"));
-    return;
+    if (!session?.user?.email) {
+      next(new HttpError(401, "로그인이 필요합니다."));
+      return;
+    }
+
+    const user = getOrCreateAppUser(session.user);
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      name: user.name
+    };
+
+    next();
+  } catch (error) {
+    next(error);
   }
-
-  req.user = {
-    id: user.id,
-    email: user.email,
-    name: user.name
-  };
-
-  next();
 }
 
 export function getGroupMembership(groupId: number, userId: number) {
   return db
     .prepare(
-      "SELECT id, group_id, user_id, role, can_edit_schedule, joined_at FROM group_members WHERE group_id = ? AND user_id = ?"
+      "SELECT id, group_id, user_id, role, nickname, can_edit_schedule, joined_at FROM group_members WHERE group_id = ? AND user_id = ?"
     )
     .get(groupId, userId) as GroupMemberRow | undefined;
 }

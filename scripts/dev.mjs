@@ -61,7 +61,7 @@ process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
 const tsc = path.join(rootDir, "node_modules", "typescript", "bin", "tsc");
-const vite = path.join(rootDir, "apps", "web", "node_modules", "vite", "bin", "vite.js");
+const vite = path.join(rootDir, "node_modules", "vite", "bin", "vite.js");
 
 runStep("서버 TypeScript 컴파일", process.execPath, [tsc, "-p", "apps/server/tsconfig.json"]);
 runStep("SQLite 테이블 생성/갱신", process.execPath, ["apps/server/dist/db/migrate.js"]);

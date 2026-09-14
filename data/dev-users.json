@@ -1,0 +1,20 @@
+{
+  "note": "비밀번호 원문은 저장하지 않습니다. password_hash는 로그인 검증용 해시입니다.",
+  "exported_at": "2026-09-14T00:45:01.842Z",
+  "users": [
+    {
+      "id": 1,
+      "name": "안녕",
+      "email": "iopasd0424@gmail.com",
+      "password_hash": "scrypt:ed977d8757ae065a2660947f99cb80ff:d4d3ed84298955db84cfa486ac898dd6ddd627fd8a96f446786d071e851aef175d90e90ca5578b46636c577ae0d19dcec2f1d1fce8c96881c5f1d8d374ce97df",
+      "created_at": "2026-09-14 00:28:21"
+    },
+    {
+      "id": 2,
+      "name": "김효성",
+      "email": "goback0424@gmail.com",
+      "password_hash": "scrypt:6375f686900caa348d598ed0450fa8c1:348319b073a915853fed2178acd04751901e4e342b18905c9598924278825d4a5cee6402b1e8445d3531f7213b3cc9698c8072cd7f6ba0dfd6bcb9dc1a202857",
+      "created_at": "2026-09-14 00:28:40"
+    }
+  ]
+}

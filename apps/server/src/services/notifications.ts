@@ -1,16 +1,20 @@
 import webPush from "web-push";
 import { db } from "../db/connection.js";
-import type { UserRow } from "../db/types.js";
 import { config } from "../config.js";
 
 type PushPayload = {
   title: string;
   body: string;
   url?: string;
-  kind: "INTAKE_DUE" | "INTAKE_COMPLETED" | "INTAKE_ESCALATED";
+  kind: "INTAKE_DUE" | "INTAKE_COMPLETED" | "INTAKE_ESCALATED" | "CHAT_MESSAGE";
 };
 
-type PushRecipient = Pick<UserRow, "id" | "push_subscription">;
+type PushSubscriptionRecipient = {
+  id: number;
+  user_id: number;
+  endpoint: string;
+  subscription_json: string;
+};
 
 const pushEnabled = Boolean(config.vapidPublicKey && config.vapidPrivateKey);
 
@@ -18,53 +22,51 @@ if (pushEnabled) {
   webPush.setVapidDetails(config.vapidSubject, config.vapidPublicKey!, config.vapidPrivateKey!);
 }
 
-export function getGroupPushRecipients(groupId: number) {
+export function getGroupPushRecipients(groupId: number, excludeUserId?: number) {
   return db
     .prepare(
-      `SELECT u.id, u.push_subscription
+      `SELECT ps.id, ps.user_id, ps.endpoint, ps.subscription_json
        FROM group_members gm
-       JOIN users u ON u.id = gm.user_id
-       WHERE gm.group_id = ? AND u.push_subscription IS NOT NULL`
+       JOIN push_subscriptions ps ON ps.user_id = gm.user_id
+       WHERE gm.group_id = ?
+         AND (? IS NULL OR gm.user_id <> ?)`
     )
-    .all(groupId) as PushRecipient[];
+    .all(groupId, excludeUserId ?? null, excludeUserId ?? null) as PushSubscriptionRecipient[];
 }
 
 export function getUserPushRecipient(userId: number) {
   return db
-    .prepare("SELECT id, push_subscription FROM users WHERE id = ? AND push_subscription IS NOT NULL")
-    .get(userId) as PushRecipient | undefined;
+    .prepare("SELECT id, user_id, endpoint, subscription_json FROM push_subscriptions WHERE user_id = ?")
+    .all(userId) as PushSubscriptionRecipient[];
 }
 
-export async function sendPushToUsers(recipients: PushRecipient[], payload: PushPayload) {
+export async function sendPushToUsers(recipients: PushSubscriptionRecipient[], payload: PushPayload) {
   if (!pushEnabled) {
     return;
   }
 
   await Promise.all(
     recipients.map(async (recipient) => {
-      if (!recipient.push_subscription) {
-        return;
-      }
-
       try {
-        await webPush.sendNotification(JSON.parse(recipient.push_subscription), JSON.stringify(payload));
+        await webPush.sendNotification(JSON.parse(recipient.subscription_json), JSON.stringify(payload));
       } catch (error) {
-        console.warn(`Failed to send push notification to user ${recipient.id}`, error);
+        db.prepare("DELETE FROM push_subscriptions WHERE id = ?").run(recipient.id);
+        console.warn(`Failed to send push notification to user ${recipient.user_id}`, error);
       }
     })
   );
 }
 
 export async function sendPushToUser(userId: number, payload: PushPayload) {
-  const recipient = getUserPushRecipient(userId);
+  const recipients = getUserPushRecipient(userId);
 
-  if (!recipient) {
+  if (recipients.length === 0) {
     return;
   }
 
-  await sendPushToUsers([recipient], payload);
+  await sendPushToUsers(recipients, payload);
 }
 
-export async function sendPushToGroup(groupId: number, payload: PushPayload) {
-  await sendPushToUsers(getGroupPushRecipients(groupId), payload);
+export async function sendPushToGroup(groupId: number, payload: PushPayload, excludeUserId?: number) {
+  await sendPushToUsers(getGroupPushRecipients(groupId, excludeUserId), payload);
 }

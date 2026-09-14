@@ -19,7 +19,7 @@ import { createSystemFeedMessage } from "../services/feed.js";
 import { sendPushToGroup } from "../services/notifications.js";
 import { runMedicationSchedulerTick } from "../services/scheduler.js";
 import { createInviteCode } from "../utils/inviteCode.js";
-import { hashPassword } from "../utils/password.js";
+import { hashPassword, verifyPassword } from "../utils/password.js";
 import {
   optionalBoolean,
   requireDaysOfWeek,
@@ -80,11 +80,30 @@ function assertTargetIsGroupMember(groupId: number, targetUserId: number) {
 function getSchedule(scheduleId: number) {
   return db
     .prepare(
-      `SELECT id, group_id, target_user_id, medicine_name, dosage, intake_time, days_of_week, is_active, created_at
+      `SELECT id, group_id, target_user_id, medicine_name, dosage, intake_time, days_of_week,
+              escalation_minutes, is_active, created_at
        FROM schedules
        WHERE id = ?`
     )
     .get(scheduleId) as ScheduleRow | undefined;
+}
+
+function requireEscalationMinutes(value: unknown) {
+  const minutes = Number(value);
+
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+    throw new HttpError(400, "escalation_minutes must be an integer between 1 and 1440");
+  }
+
+  return minutes;
+}
+
+function getGroupDisplayName(groupId: number, userId: number, fallback: string) {
+  const membership = db
+    .prepare("SELECT nickname FROM group_members WHERE group_id = ? AND user_id = ?")
+    .get(groupId, userId) as { nickname: string | null } | undefined;
+
+  return membership?.nickname?.trim() || fallback;
 }
 
 function createVerificationFeed(
@@ -94,10 +113,11 @@ function createVerificationFeed(
   verificationType: "BUTTON" | "PHOTO",
   photoUrl: string | null
 ) {
+  const displayName = getGroupDisplayName(schedule.group_id, user.id, user.name);
   const content =
     verificationType === "PHOTO"
-      ? `${user.name}님이 사진으로 복약을 인증했습니다.`
-      : `${user.name}님이 복약을 완료했습니다.`;
+      ? `${displayName}님이 사진으로 복약을 인증했습니다.`
+      : `${displayName}님이 복약을 완료했습니다.`;
 
   return createSystemFeedMessage(io, schedule.group_id, content, photoUrl);
 }
@@ -127,11 +147,39 @@ export function createApiRouter(io: Server) {
     })
   );
 
+  router.post(
+    "/auth/login",
+    asyncHandler(async (req, res) => {
+      const email = requireEmail(req.body.email);
+      const password = requireString(req.body.password, "password");
+      const userWithPassword = db
+        .prepare("SELECT id, email, name, password_hash, created_at FROM users WHERE email = ?")
+        .get(email) as { id: number; email: string; name: string; password_hash: string; created_at: string } | undefined;
+
+      if (!userWithPassword || !verifyPassword(password, userWithPassword.password_hash)) {
+        throw new HttpError(401, "이메일 또는 비밀번호가 올바르지 않습니다.");
+      }
+
+      const { password_hash: _passwordHash, ...user } = userWithPassword;
+      res.json({ user });
+    })
+  );
+
   router.get(
     "/me",
     requireAuth,
     asyncHandler(async (req, res) => {
       res.json({ user: (req as AuthedRequest).user });
+    })
+  );
+
+  router.get(
+    "/push/vapid-public-key",
+    asyncHandler((_req, res) => {
+      res.json({
+        enabled: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
+        publicKey: process.env.VAPID_PUBLIC_KEY ?? null
+      });
     })
   );
 
@@ -145,10 +193,17 @@ export function createApiRouter(io: Server) {
         throw new HttpError(400, "Push subscription body is required");
       }
 
-      db.prepare("UPDATE users SET push_subscription = ? WHERE id = ?").run(
-        JSON.stringify(req.body),
-        authedReq.user.id
-      );
+      const endpoint = requireString(req.body.endpoint, "endpoint");
+      const subscriptionJson = JSON.stringify(req.body);
+
+      db.prepare(
+        `INSERT INTO push_subscriptions (user_id, endpoint, subscription_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           user_id = excluded.user_id,
+           subscription_json = excluded.subscription_json,
+           updated_at = CURRENT_TIMESTAMP`
+      ).run(authedReq.user.id, endpoint, subscriptionJson);
 
       res.status(204).send();
     })
@@ -159,7 +214,14 @@ export function createApiRouter(io: Server) {
     requireAuth,
     asyncHandler((req, res) => {
       const authedReq = req as AuthedRequest;
-      db.prepare("UPDATE users SET push_subscription = NULL WHERE id = ?").run(authedReq.user.id);
+      const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : null;
+
+      if (endpoint) {
+        db.prepare("DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?").run(authedReq.user.id, endpoint);
+      } else {
+        db.prepare("DELETE FROM push_subscriptions WHERE user_id = ?").run(authedReq.user.id);
+      }
+
       res.status(204).send();
     })
   );
@@ -213,6 +275,72 @@ export function createApiRouter(io: Server) {
     })
   );
 
+  router.patch(
+    "/groups/:groupId",
+    requireAuth,
+    requireGroupOwner,
+    asyncHandler((req, res) => {
+      const groupId = requireInt(req.params.groupId, "groupId");
+      const name = requireString(req.body.name, "name");
+
+      db.prepare("UPDATE groups SET name = ? WHERE id = ?").run(name, groupId);
+
+      const group = db
+        .prepare("SELECT id, name, owner_id, invite_code, created_at FROM groups WHERE id = ?")
+        .get(groupId);
+
+      res.json({ group });
+    })
+  );
+
+  router.post(
+    "/groups/:groupId/invite-code",
+    requireAuth,
+    requireGroupOwner,
+    asyncHandler((req, res) => {
+      const groupId = requireInt(req.params.groupId, "groupId");
+      const inviteCode = createUniqueInviteCode();
+
+      db.prepare("UPDATE groups SET invite_code = ? WHERE id = ?").run(inviteCode, groupId);
+
+      const group = db
+        .prepare("SELECT id, name, owner_id, invite_code, created_at FROM groups WHERE id = ?")
+        .get(groupId);
+
+      res.json({ group });
+    })
+  );
+
+  router.delete(
+    "/groups/:groupId",
+    requireAuth,
+    requireGroupOwner,
+    asyncHandler((req, res) => {
+      const groupId = requireInt(req.params.groupId, "groupId");
+
+      db.prepare("DELETE FROM groups WHERE id = ?").run(groupId);
+      res.status(204).send();
+    })
+  );
+
+  router.delete(
+    "/groups/:groupId/me",
+    requireAuth,
+    requireGroupMember,
+    asyncHandler((req, res) => {
+      const authedReq = req as AuthedRequest;
+      const groupId = requireInt(req.params.groupId, "groupId");
+      const membership = getGroupMembership(groupId, authedReq.user.id);
+
+      if (membership?.role === "OWNER") {
+        throw new HttpError(400, "Owner must delete the group instead of leaving it");
+      }
+
+      db.prepare("DELETE FROM group_members WHERE group_id = ? AND user_id = ?").run(groupId, authedReq.user.id);
+      res.status(204).send();
+    })
+  );
+
   router.post(
     "/groups/join",
     requireAuth,
@@ -244,16 +372,49 @@ export function createApiRouter(io: Server) {
       const groupId = requireInt(req.params.groupId, "groupId");
       const members = db
         .prepare(
-          `SELECT gm.id, gm.group_id, gm.user_id, gm.role, gm.can_edit_schedule, gm.joined_at,
-                  u.email, u.name
+          `SELECT gm.id, gm.group_id, gm.user_id, gm.role, gm.nickname, gm.can_edit_schedule, gm.joined_at,
+                  u.email, u.name, COALESCE(NULLIF(gm.nickname, ''), u.name) AS display_name
            FROM group_members gm
            JOIN users u ON u.id = gm.user_id
            WHERE gm.group_id = ?
-           ORDER BY gm.role = 'OWNER' DESC, u.name ASC`
+           ORDER BY gm.role = 'OWNER' DESC, display_name ASC`
         )
         .all(groupId);
 
       res.json({ members });
+    })
+  );
+
+  router.patch(
+    "/groups/:groupId/me/nickname",
+    requireAuth,
+    requireGroupMember,
+    asyncHandler((req, res) => {
+      const authedReq = req as AuthedRequest;
+      const groupId = requireInt(req.params.groupId, "groupId");
+      const nickname = String(req.body.nickname ?? "").trim();
+
+      if (nickname.length > 30) {
+        throw new HttpError(400, "Nickname must be 30 characters or fewer");
+      }
+
+      db.prepare("UPDATE group_members SET nickname = ? WHERE group_id = ? AND user_id = ?").run(
+        nickname || null,
+        groupId,
+        authedReq.user.id
+      );
+
+      const member = db
+        .prepare(
+          `SELECT gm.id, gm.group_id, gm.user_id, gm.role, gm.nickname, gm.can_edit_schedule, gm.joined_at,
+                  u.email, u.name, COALESCE(NULLIF(gm.nickname, ''), u.name) AS display_name
+           FROM group_members gm
+           JOIN users u ON u.id = gm.user_id
+           WHERE gm.group_id = ? AND gm.user_id = ?`
+        )
+        .get(groupId, authedReq.user.id);
+
+      res.json({ member });
     })
   );
 
@@ -281,10 +442,35 @@ export function createApiRouter(io: Server) {
       db.prepare("UPDATE group_members SET can_edit_schedule = ? WHERE id = ?").run(canEditSchedule ? 1 : 0, memberId);
 
       const updatedMember = db
-        .prepare("SELECT id, group_id, user_id, role, can_edit_schedule, joined_at FROM group_members WHERE id = ?")
+        .prepare("SELECT id, group_id, user_id, role, nickname, can_edit_schedule, joined_at FROM group_members WHERE id = ?")
         .get(memberId);
 
       res.json({ member: updatedMember });
+    })
+  );
+
+  router.delete(
+    "/groups/:groupId/members/:memberId",
+    requireAuth,
+    requireGroupOwner,
+    asyncHandler((req, res) => {
+      const groupId = requireInt(req.params.groupId, "groupId");
+      const memberId = requireInt(req.params.memberId, "memberId");
+
+      const member = db
+        .prepare("SELECT id, role FROM group_members WHERE id = ? AND group_id = ?")
+        .get(memberId, groupId) as { id: number; role: string } | undefined;
+
+      if (!member) {
+        throw new HttpError(404, "Group member was not found");
+      }
+
+      if (member.role === "OWNER") {
+        throw new HttpError(400, "Owner cannot be removed from the group");
+      }
+
+      db.prepare("DELETE FROM group_members WHERE id = ? AND group_id = ?").run(memberId, groupId);
+      res.status(204).send();
     })
   );
 
@@ -297,9 +483,11 @@ export function createApiRouter(io: Server) {
       const schedules = db
         .prepare(
           `SELECT s.id, s.group_id, s.target_user_id, s.medicine_name, s.dosage, s.intake_time,
-                  s.days_of_week, s.is_active, s.created_at, u.name AS target_user_name
+                  s.days_of_week, s.escalation_minutes, s.is_active, s.created_at,
+                  COALESCE(NULLIF(gm.nickname, ''), u.name) AS target_user_name
            FROM schedules s
            JOIN users u ON u.id = s.target_user_id
+           LEFT JOIN group_members gm ON gm.group_id = s.group_id AND gm.user_id = s.target_user_id
            WHERE s.group_id = ?
            ORDER BY s.intake_time ASC, s.created_at DESC`
         )
@@ -321,11 +509,13 @@ export function createApiRouter(io: Server) {
       const schedules = db
         .prepare(
           `SELECT s.id, s.group_id, s.target_user_id, s.medicine_name, s.dosage, s.intake_time,
-                  s.days_of_week, s.is_active, s.created_at, u.name AS target_user_name,
+                  s.days_of_week, s.escalation_minutes, s.is_active, s.created_at,
+                  COALESCE(NULLIF(gm.nickname, ''), u.name) AS target_user_name,
                   il.id AS intake_log_id, il.status, il.verification_type, il.photo_url,
                   il.completed_at, il.scheduled_time
            FROM schedules s
            JOIN users u ON u.id = s.target_user_id
+           LEFT JOIN group_members gm ON gm.group_id = s.group_id AND gm.user_id = s.target_user_id
            LEFT JOIN intake_logs il
              ON il.schedule_id = s.id
             AND il.scheduled_time >= ?
@@ -350,15 +540,17 @@ export function createApiRouter(io: Server) {
       const dosage = requireString(req.body.dosage, "dosage");
       const intakeTime = requireIntakeTime(req.body.intake_time);
       const daysOfWeek = requireDaysOfWeek(req.body.days_of_week);
+      const escalationMinutes =
+        req.body.escalation_minutes === undefined ? 30 : requireEscalationMinutes(req.body.escalation_minutes);
 
       assertTargetIsGroupMember(groupId, targetUserId);
 
       const result = db
         .prepare(
-          `INSERT INTO schedules (group_id, target_user_id, medicine_name, dosage, intake_time, days_of_week)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO schedules (group_id, target_user_id, medicine_name, dosage, intake_time, days_of_week, escalation_minutes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(groupId, targetUserId, medicineName, dosage, intakeTime, daysOfWeek);
+        .run(groupId, targetUserId, medicineName, dosage, intakeTime, daysOfWeek, escalationMinutes);
       const schedule = getSchedule(Number(result.lastInsertRowid));
 
       res.status(201).json({ schedule });
@@ -393,15 +585,19 @@ export function createApiRouter(io: Server) {
         req.body.days_of_week === undefined
           ? existingSchedule.days_of_week
           : requireDaysOfWeek(req.body.days_of_week);
+      const escalationMinutes =
+        req.body.escalation_minutes === undefined
+          ? existingSchedule.escalation_minutes
+          : requireEscalationMinutes(req.body.escalation_minutes);
       const isActive = req.body.is_active === undefined ? existingSchedule.is_active === 1 : optionalBoolean(req.body.is_active, true);
 
       assertTargetIsGroupMember(groupId, targetUserId);
 
       db.prepare(
         `UPDATE schedules
-         SET target_user_id = ?, medicine_name = ?, dosage = ?, intake_time = ?, days_of_week = ?, is_active = ?
+         SET target_user_id = ?, medicine_name = ?, dosage = ?, intake_time = ?, days_of_week = ?, escalation_minutes = ?, is_active = ?
          WHERE id = ?`
-      ).run(targetUserId, medicineName, dosage, intakeTime, daysOfWeek, isActive ? 1 : 0, scheduleId);
+      ).run(targetUserId, medicineName, dosage, intakeTime, daysOfWeek, escalationMinutes, isActive ? 1 : 0, scheduleId);
 
       res.json({ schedule: getSchedule(scheduleId) });
     })
@@ -420,7 +616,7 @@ export function createApiRouter(io: Server) {
         throw new HttpError(404, "Schedule was not found");
       }
 
-      db.prepare("UPDATE schedules SET is_active = 0 WHERE id = ?").run(scheduleId);
+      db.prepare("DELETE FROM schedules WHERE id = ?").run(scheduleId);
       res.status(204).send();
     })
   );
@@ -452,6 +648,16 @@ export function createApiRouter(io: Server) {
         typeof req.body.scheduled_time === "string" && req.body.scheduled_time.trim()
           ? new Date(req.body.scheduled_time).toISOString()
           : buildScheduledTime(new Date(), schedule.intake_time);
+      const scheduledAt = new Date(scheduledTime);
+
+      if (Number.isNaN(scheduledAt.getTime())) {
+        throw new HttpError(400, "scheduled_time is invalid");
+      }
+
+      if (scheduledAt.getTime() > Date.now()) {
+        throw new HttpError(400, "Medication can only be completed after the scheduled time");
+      }
+
       const photoUrl = req.file ? `/uploads/intake-verifications/${req.file.filename}` : null;
       const verificationType = photoUrl ? "PHOTO" : "BUTTON";
       const completedAt = new Date().toISOString();
@@ -483,10 +689,11 @@ export function createApiRouter(io: Server) {
       });
 
       const intakeLog = completeLog();
+      const displayName = getGroupDisplayName(schedule.group_id, authedReq.user.id, authedReq.user.name);
 
       await sendPushToGroup(schedule.group_id, {
         title: "복약 완료",
-        body: `${authedReq.user.name}님이 복약을 완료했습니다.`,
+        body: `${displayName}님이 복약을 완료했습니다.`,
         kind: "INTAKE_COMPLETED",
         url: "/"
       });
@@ -515,7 +722,7 @@ export function createApiRouter(io: Server) {
     "/groups/:groupId/messages",
     requireAuth,
     requireGroupMember,
-    asyncHandler((req, res) => {
+    asyncHandler(async (req, res) => {
       const authedReq = req as AuthedRequest;
       const groupId = requireInt(req.params.groupId, "groupId");
       const content = requireString(req.body.content, "content");
@@ -529,14 +736,26 @@ export function createApiRouter(io: Server) {
       const message = db
         .prepare(
           `SELECT cm.id, cm.group_id, cm.sender_id, cm.message_type, cm.content, cm.photo_url,
-                  cm.created_at, u.name AS sender_name
+                  cm.created_at, COALESCE(NULLIF(gm.nickname, ''), u.name) AS sender_name
            FROM chat_messages cm
            LEFT JOIN users u ON u.id = cm.sender_id
+           LEFT JOIN group_members gm ON gm.group_id = cm.group_id AND gm.user_id = cm.sender_id
            WHERE cm.id = ?`
         )
         .get(Number(result.lastInsertRowid));
+      const displayName = getGroupDisplayName(groupId, authedReq.user.id, authedReq.user.name);
 
       io.to(`group:${groupId}`).emit("chat:message", message);
+      await sendPushToGroup(
+        groupId,
+        {
+          title: `${displayName}님의 새 메시지`,
+          body: content,
+          kind: "CHAT_MESSAGE",
+          url: "/"
+        },
+        authedReq.user.id
+      );
       res.status(201).json({ message });
     })
   );
@@ -551,9 +770,10 @@ export function createApiRouter(io: Server) {
       const messages = db
         .prepare(
           `SELECT cm.id, cm.group_id, cm.sender_id, cm.message_type, cm.content, cm.photo_url,
-                  cm.created_at, u.name AS sender_name
+                  cm.created_at, COALESCE(NULLIF(gm.nickname, ''), u.name) AS sender_name
            FROM chat_messages cm
            LEFT JOIN users u ON u.id = cm.sender_id
+           LEFT JOIN group_members gm ON gm.group_id = cm.group_id AND gm.user_id = cm.sender_id
            WHERE cm.group_id = ?
            ORDER BY cm.created_at DESC, cm.id DESC
            LIMIT ?`

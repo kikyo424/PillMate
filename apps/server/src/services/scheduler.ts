@@ -19,6 +19,7 @@ type PendingEscalationRow = {
   group_id: number;
   medicine_name: string;
   dosage: string;
+  escalation_minutes: number;
   target_user_name: string;
 };
 
@@ -29,9 +30,11 @@ function getDueSchedules(now: Date) {
   return db
     .prepare(
       `SELECT s.id, s.group_id, s.target_user_id, s.medicine_name, s.dosage, s.intake_time,
-              s.days_of_week, s.is_active, s.created_at, u.name AS target_user_name
+              s.days_of_week, s.escalation_minutes, s.is_active, s.created_at,
+              COALESCE(NULLIF(gm.nickname, ''), u.name) AS target_user_name
        FROM schedules s
        JOIN users u ON u.id = s.target_user_id
+       LEFT JOIN group_members gm ON gm.group_id = s.group_id AND gm.user_id = s.target_user_id
        WHERE s.is_active = 1
          AND s.intake_time = ?
          AND instr(',' || s.days_of_week || ',', ',' || ? || ',') > 0`
@@ -40,20 +43,28 @@ function getDueSchedules(now: Date) {
 }
 
 function getPendingEscalations(now: Date) {
-  const escalationCutoff = new Date(now.getTime() - config.escalationMinutes * 60 * 1000).toISOString();
+  const nowMs = now.getTime();
 
-  return db
+  const pendingEscalations = db
     .prepare(
       `SELECT il.id, il.schedule_id, il.target_user_id, il.scheduled_time,
-              s.group_id, s.medicine_name, s.dosage, u.name AS target_user_name
+              s.group_id, s.medicine_name, s.dosage, s.escalation_minutes,
+              COALESCE(NULLIF(gm.nickname, ''), u.name) AS target_user_name
        FROM intake_logs il
        JOIN schedules s ON s.id = il.schedule_id
        JOIN users u ON u.id = il.target_user_id
+       LEFT JOIN group_members gm ON gm.group_id = s.group_id AND gm.user_id = il.target_user_id
        WHERE il.status = 'PENDING'
-         AND il.escalated_at IS NULL
-         AND il.scheduled_time <= ?`
+         AND il.escalated_at IS NULL`
     )
-    .all(escalationCutoff) as PendingEscalationRow[];
+    .all() as PendingEscalationRow[];
+
+  return pendingEscalations.filter((intake) => {
+    const scheduledAt = new Date(intake.scheduled_time).getTime();
+    const minutes = intake.escalation_minutes ?? config.escalationMinutes;
+
+    return Number.isFinite(scheduledAt) && scheduledAt + minutes * 60 * 1000 <= nowMs;
+  });
 }
 
 async function notifyDueSchedule(io: Server, schedule: DueScheduleRow, now: Date) {

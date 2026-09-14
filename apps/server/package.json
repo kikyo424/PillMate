@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsc -p tsconfig.json && node --watch dist/index.js",
-    "build": "tsc -p tsconfig.json",
+    "dev": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node --watch dist/index.js",
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "db:init": "tsc -p tsconfig.json && node dist/db/migrate.js"
+    "db:init": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node dist/db/migrate.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -19,6 +19,7 @@
 
 - Language: TypeScript
 - Backend: Node.js, Express, Socket.io, Multer, node-cron
+- Auth: Better Auth
 - Database: SQLite
 - Frontend: React, Vite, Tailwind CSS, Socket.io Client, Lucide React
 - Notification: Web Push API, Service Worker
@@ -47,28 +48,41 @@ uploads/                  사진 인증 업로드 파일
 
 ## 실행 방법
 
+이 프로젝트는 Node.js 24 이상이 필요합니다.
+
+Windows에서 `nvm`을 사용한다면 먼저 프로젝트 루트 폴더에서 Node 24를 선택합니다.
+
+```bash
+nvm install 24
+nvm use 24
+```
+
 의존성을 설치합니다.
 
+```bash
+pnpm install
+```
 
-SQLite 테이블 생성/갱신, API 서버 실행, 웹앱 실행을 한 번에 처리합니다.
+SQLite 테이블 생성/갱신, API 서버 실행, 웹앱 실행을 한 번에 시작합니다.
 
 ```bash
 pnpm dev
 ```
 
-실행 후 아래 주소로 접속합니다.
+웹앱 기본 주소는 `http://localhost:5173`이고, API 서버 기본 주소는 `http://localhost:4000`입니다.
 
-```text
-웹앱: http://localhost:5173
-API 서버: http://localhost:4000
-```
-
-필요하면 각 작업을 따로 실행할 수도 있습니다.
+필요하면 아래처럼 각각 따로 실행할 수도 있습니다.
 
 SQLite 테이블만 생성하거나 갱신합니다.
 
 ```bash
 pnpm db:init
+```
+
+테스트 데이터를 모두 지우고 SQLite DB를 새로 만듭니다. 실행 중인 개발 서버가 있다면 먼저 중지한 뒤 실행합니다.
+
+```bash
+pnpm db:reset
 ```
 
 API 서버를 실행합니다.
@@ -87,6 +101,39 @@ pnpm dev:web
 
 웹앱 기본 주소는 `http://localhost:5173`입니다.
 
+## 실행 문제 해결
+
+`pnpm dev` 실행 시 아래 메시지가 나오면 현재 터미널에서 사용할 Node.js 버전이 선택되지 않은 상태입니다.
+
+```text
+No active Node.js version is configured.
+```
+
+프로젝트 루트 폴더에서 아래 명령을 실행한 뒤 다시 `pnpm dev`를 실행합니다.
+
+```bash
+nvm install 24
+nvm use 24
+pnpm install
+pnpm dev
+```
+
+`npm`, `pnpm`, `corepack` 실행 시 아래처럼 nvm 신뢰 오류가 나오면 nvm 실행기 등록이 꼬인 상태입니다.
+
+```text
+NVM blocked package-manager execution because a delegated command could not be trusted.
+```
+
+이 경우 아래 순서로 복구합니다.
+
+```bash
+nvm reshim
+nvm doctor --autofix
+nvm use 24
+pnpm install
+pnpm dev
+```
+
 ## 환경 변수
 
 서버 환경 변수 예시는 `apps/server/.env.example`에 있습니다.
@@ -95,6 +142,8 @@ pnpm dev:web
 PORT=4000
 DATABASE_URL=../../data/pillmate.sqlite
 CORS_ORIGIN=http://localhost:5173
+BETTER_AUTH_URL=http://localhost:4000
+BETTER_AUTH_SECRET=change-this-secret-before-production
 ESCALATION_MINUTES=30
 VAPID_SUBJECT=mailto:admin@example.com
 VAPID_PUBLIC_KEY=
@@ -103,17 +152,38 @@ VAPID_PRIVATE_KEY=
 
 `VAPID_PUBLIC_KEY`와 `VAPID_PRIVATE_KEY`가 없으면 실제 브라우저 푸시는 전송되지 않습니다. 이 경우에도 Socket.io 실시간 이벤트와 그룹 피드는 정상 동작합니다.
 
-## 개발용 인증 방식
+개발용 VAPID 키는 아래 명령으로 생성할 수 있습니다.
 
-현재 MVP는 빠른 개발과 테스트를 위해 `x-user-id` 헤더로 인증 사용자를 지정합니다.
+```bash
+pnpm push:keys
+```
 
-먼저 사용자를 생성한 뒤, 응답으로 받은 `user.id`를 인증이 필요한 API 요청의 `x-user-id` 헤더에 넣으면 됩니다. 실제 서비스 단계에서는 JWT 또는 세션 기반 로그인으로 교체하는 것을 권장합니다.
+생성된 값을 `apps/server/.env`에 넣은 뒤 서버를 다시 실행하면 홈 화면의 `기기 알림`에서 이 기기 알림을 켤 수 있습니다.
+
+## 인증 방식
+
+현재 앱은 Better Auth 기반 이메일/비밀번호 로그인을 사용합니다.
+
+웹앱에서 회원가입 또는 로그인을 하면 Better Auth가 세션 쿠키를 발급하고, 서버는 세션 사용자 이메일을 PillMate 내부 사용자와 연결합니다. 그래서 PC와 모바일에서 같은 이메일/비밀번호로 로그인하면 같은 PillMate 사용자로 접근할 수 있습니다.
+
+개발 호환성을 위해 기존 `x-user-id` 헤더 인증도 남겨두었지만, 웹앱은 기본적으로 Better Auth 세션을 사용합니다.
+
+개발 중 저장된 사용자 ID, 이름, 이메일을 파일로 확인하려면 아래 명령을 실행합니다.
+
+```bash
+pnpm users:export
+```
+
+결과는 `data/dev-users.json`에 저장됩니다. 비밀번호 원문은 저장하지 않으며, 파일에는 로그인 검증용 `password_hash`만 포함됩니다.
 
 ## 구현된 API
 
 사용자:
 
 ```text
+POST   /api/auth/sign-up/email
+POST   /api/auth/sign-in/email
+GET    /api/auth/get-session
 POST   /api/users
 GET    /api/me
 POST   /api/me/push-subscription
@@ -198,7 +268,7 @@ chat:message       가족 대화방 메시지 또는 시스템 피드
 - 가족 대화방: 텍스트 메시지와 복약 인증 시스템 피드
 - 스케줄 관리: 권한자용 복약 일정 생성 및 구성원 권한 관리
 
-모바일에서는 하단 탭으로 `오늘`, `대화`, `관리` 화면을 전환합니다. 데스크톱에서는 복약 대시보드와 대화방을 2열로 함께 보여줍니다.
+모바일에서는 하단 탭으로 `홈`, `오늘`, `대화`, `관리` 화면을 전환합니다. 데스크톱에서는 복약 대시보드와 대화방을 2열로 함께 보여줍니다.
 
 ## 빌드 확인
 
@@ -216,8 +286,6 @@ pnpm --filter @pillmate/web build
 
 ## 다음 개선 과제
 
-- JWT 또는 세션 기반 로그인 구현
-- 프론트엔드 Web Push 권한 요청 및 구독 등록 UI
-- 스케줄 수정/삭제 UI 고도화
 - 채팅 메시지 이모지 반응 기능
 - API 통합 테스트와 데모 시드 데이터 추가
+- 배포 후 모바일 PWA 설치, HTTPS 환경, 실제 푸시 수신 검증

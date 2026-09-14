@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS group_members (
   group_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   role TEXT CHECK(role IN ('OWNER', 'MANAGER', 'MEMBER')) DEFAULT 'MEMBER',
+  nickname TEXT NULL,
   can_edit_schedule INTEGER DEFAULT 0,
   joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS schedules (
   dosage TEXT NOT NULL,
   intake_time TEXT NOT NULL,
   days_of_week TEXT NOT NULL,
+  escalation_minutes INTEGER DEFAULT 30,
   is_active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
@@ -61,6 +63,16 @@ CREATE TABLE IF NOT EXISTS intake_logs (
   UNIQUE (schedule_id, scheduled_time)
 );
 
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  endpoint TEXT UNIQUE NOT NULL,
+  subscription_json TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   group_id INTEGER NOT NULL,
@@ -80,5 +92,6 @@ CREATE INDEX IF NOT EXISTS idx_schedules_target_user_id ON schedules(target_user
 CREATE INDEX IF NOT EXISTS idx_intake_logs_schedule_id ON intake_logs(schedule_id);
 CREATE INDEX IF NOT EXISTS idx_intake_logs_target_user_id ON intake_logs(target_user_id);
 CREATE INDEX IF NOT EXISTS idx_intake_logs_status_scheduled_time ON intake_logs(status, scheduled_time);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_group_created ON chat_messages(group_id, created_at);
 `;

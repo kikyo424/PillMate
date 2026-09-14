@@ -20,6 +20,7 @@ export type GroupMemberRow = {
   group_id: number;
   user_id: number;
   role: "OWNER" | "MANAGER" | "MEMBER";
+  nickname: string | null;
   can_edit_schedule: 0 | 1;
   joined_at: string;
 };
@@ -32,6 +33,7 @@ export type ScheduleRow = {
   dosage: string;
   intake_time: string;
   days_of_week: string;
+  escalation_minutes: number;
   is_active: 0 | 1;
   created_at: string;
 };

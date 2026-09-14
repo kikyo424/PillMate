@@ -3,16 +3,26 @@
   "private": true,
   "version": "0.1.0",
   "description": "Group-based medication care web app",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "dev:server": "pnpm --filter @pillmate/server dev",
-    "dev:web": "pnpm --filter @pillmate/web dev",
-    "build": "pnpm --filter @pillmate/server build",
-    "build:web": "pnpm --filter @pillmate/web build",
-    "build:all": "pnpm --filter @pillmate/server build && pnpm --filter @pillmate/web build",
-    "db:init": "pnpm --filter @pillmate/server db:init"
+    "dev": "node --watch scripts/dev.mjs",
+    "dev:server": "node node_modules/typescript/bin/tsc -p apps/server/tsconfig.json && node --watch apps/server/dist/index.js",
+    "dev:web": "node node_modules/vite/bin/vite.js --host 0.0.0.0 --config apps/web/vite.config.ts",
+    "build": "node node_modules/typescript/bin/tsc -p apps/server/tsconfig.json",
+    "build:web": "node node_modules/typescript/bin/tsc -b apps/web/tsconfig.json && node node_modules/vite/bin/vite.js build --config apps/web/vite.config.ts",
+    "build:all": "node node_modules/typescript/bin/tsc -p apps/server/tsconfig.json && node node_modules/typescript/bin/tsc -b apps/web/tsconfig.json && node node_modules/vite/bin/vite.js build --config apps/web/vite.config.ts",
+    "db:init": "node node_modules/typescript/bin/tsc -p apps/server/tsconfig.json && node apps/server/dist/db/migrate.js",
+    "db:reset": "node node_modules/typescript/bin/tsc -p apps/server/tsconfig.json && node scripts/reset-db.mjs && node apps/server/dist/db/migrate.js",
+    "users:export": "node scripts/export-users.mjs",
+    "push:keys": "node scripts/generate-vapid-keys.mjs"
   },
   "workspaces": [
     "apps/*"
-  ]
+  ],
+  "dependencies": {
+    "better-auth": "^1.7.4"
+  }
 }

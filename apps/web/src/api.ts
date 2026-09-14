@@ -1,4 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ?? `${window.location.protocol}//${window.location.hostname}:4000`;
 
 export type User = {
   id: number;
@@ -20,6 +21,8 @@ export type Member = {
   group_id: number;
   user_id: number;
   role: "OWNER" | "MANAGER" | "MEMBER";
+  nickname: string | null;
+  display_name: string;
   can_edit_schedule: 0 | 1;
   email: string;
   name: string;
@@ -34,6 +37,7 @@ export type Schedule = {
   dosage: string;
   intake_time: string;
   days_of_week: string;
+  escalation_minutes: number;
   is_active: 0 | 1;
   status?: "PENDING" | "COMPLETED" | "MISSED" | "SKIPPED" | null;
   verification_type?: "BUTTON" | "PHOTO" | null;
@@ -53,11 +57,25 @@ export type ChatMessage = {
   created_at: string;
 };
 
+export type PushKeyStatus = {
+  enabled: boolean;
+  publicKey: string | null;
+};
+
 type ApiOptions = {
   method?: string;
   userId?: number;
   body?: unknown;
 };
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
 
 async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers();
@@ -78,12 +96,13 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: options.method ?? "GET",
     headers,
-    body
+    body,
+    credentials: "include"
   });
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({ error: "Request failed" }));
-    throw new Error(errorBody.error ?? "Request failed");
+    throw new ApiError(response.status, errorBody.error ?? "Request failed");
   }
 
   if (response.status === 204) {
@@ -96,6 +115,27 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
 export const apiBaseUrl = API_BASE_URL;
 
 export const pillmateApi = {
+  me() {
+    return api<{ user: User }>("/api/me");
+  },
+  getVapidPublicKey() {
+    return api<PushKeyStatus>("/api/push/vapid-public-key");
+  },
+  savePushSubscription(subscription: PushSubscriptionJSON) {
+    return api<void>("/api/me/push-subscription", {
+      method: "POST",
+      body: subscription
+    });
+  },
+  deletePushSubscription(endpoint?: string) {
+    return api<void>("/api/me/push-subscription", {
+      method: "DELETE",
+      body: endpoint ? { endpoint } : undefined
+    });
+  },
+  login(body: { email: string; password: string }) {
+    return api<{ user: User }>("/api/auth/login", { method: "POST", body });
+  },
   createUser(body: { name: string; email: string; password: string }) {
     return api<{ user: User }>("/api/users", { method: "POST", body });
   },
@@ -112,6 +152,31 @@ export const pillmateApi = {
       body: { invite_code: inviteCode }
     });
   },
+  updateGroup(userId: number, groupId: number, name: string) {
+    return api<{ group: Group }>(`/api/groups/${groupId}`, {
+      method: "PATCH",
+      userId,
+      body: { name }
+    });
+  },
+  regenerateInviteCode(userId: number, groupId: number) {
+    return api<{ group: Group }>(`/api/groups/${groupId}/invite-code`, {
+      method: "POST",
+      userId
+    });
+  },
+  leaveGroup(userId: number, groupId: number) {
+    return api<void>(`/api/groups/${groupId}/me`, {
+      method: "DELETE",
+      userId
+    });
+  },
+  deleteGroup(userId: number, groupId: number) {
+    return api<void>(`/api/groups/${groupId}`, {
+      method: "DELETE",
+      userId
+    });
+  },
   listMembers(userId: number, groupId: number) {
     return api<{ members: Member[] }>(`/api/groups/${groupId}/members`, { userId });
   },
@@ -120,6 +185,19 @@ export const pillmateApi = {
       method: "PATCH",
       userId,
       body: { can_edit_schedule: canEditSchedule }
+    });
+  },
+  updateMyNickname(userId: number, groupId: number, nickname: string) {
+    return api<{ member: Member }>(`/api/groups/${groupId}/me/nickname`, {
+      method: "PATCH",
+      userId,
+      body: { nickname }
+    });
+  },
+  removeMember(userId: number, groupId: number, memberId: number) {
+    return api<void>(`/api/groups/${groupId}/members/${memberId}`, {
+      method: "DELETE",
+      userId
     });
   },
   listTodaySchedules(userId: number, groupId: number) {
@@ -135,11 +213,28 @@ export const pillmateApi = {
       body
     });
   },
-  completeSchedule(userId: number, scheduleId: number, photo?: File) {
+  updateSchedule(userId: number, groupId: number, scheduleId: number, body: Record<string, unknown>) {
+    return api<{ schedule: Schedule }>(`/api/groups/${groupId}/schedules/${scheduleId}`, {
+      method: "PATCH",
+      userId,
+      body
+    });
+  },
+  deleteSchedule(userId: number, groupId: number, scheduleId: number) {
+    return api<void>(`/api/groups/${groupId}/schedules/${scheduleId}`, {
+      method: "DELETE",
+      userId
+    });
+  },
+  completeSchedule(userId: number, scheduleId: number, photo?: File, scheduledTime?: string | null) {
     const body = new FormData();
 
     if (photo) {
       body.set("photo", photo);
+    }
+
+    if (scheduledTime) {
+      body.set("scheduled_time", scheduledTime);
     }
 
     return api<{ intake_log: unknown }>(`/api/schedules/${scheduleId}/complete`, {

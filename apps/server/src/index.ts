@@ -1,26 +1,30 @@
 import cors from "cors";
 import express from "express";
 import http from "node:http";
+import { toNodeHandler } from "better-auth/node";
 import { Server } from "socket.io";
+import { auth } from "./auth.js";
 import { config } from "./config.js";
 import { getDatabasePath } from "./db/connection.js";
 import { applyMigrations } from "./db/migrations.js";
 import { errorHandler } from "./http/errors.js";
 import { createApiRouter } from "./routes/api.js";
 import { startMedicationScheduler } from "./services/scheduler.js";
+import { resolveCorsOrigin } from "./utils/origins.js";
 
-applyMigrations();
+await applyMigrations();
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: config.corsOrigin,
+    origin: resolveCorsOrigin,
     credentials: true
   }
 });
 
-app.use(cors({ origin: config.corsOrigin, credentials: true }));
+app.use(cors({ origin: resolveCorsOrigin, credentials: true }));
+app.all("/api/auth/*", toNodeHandler(auth));
 app.use(express.json());
 app.use("/uploads", express.static("uploads"));
 

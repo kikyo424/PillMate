@@ -6,3 +6,20 @@ export function hashPassword(password: string) {
 
   return `scrypt:${salt}:${hash}`;
 }
+
+export function verifyPassword(password: string, passwordHash: string) {
+  const [algorithm, salt, storedHash] = passwordHash.split(":");
+
+  if (algorithm !== "scrypt" || !salt || !storedHash) {
+    return false;
+  }
+
+  const candidateHash = crypto.scryptSync(password, salt, 64);
+  const storedHashBuffer = Buffer.from(storedHash, "hex");
+
+  if (candidateHash.length !== storedHashBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(candidateHash, storedHashBuffer);
+}
