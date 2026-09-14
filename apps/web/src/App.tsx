@@ -495,7 +495,7 @@ function App() {
               </div>
               <div className="min-w-0">
                 <h1 className="truncate text-lg font-semibold">PillMate</h1>
-                <p className="truncate text-sm text-slate-500">{user.name}님의 복약 케어</p>
+                <p className="truncate text-sm text-slate-500">{user.name}님의 복약 알림</p>
               </div>
             </button>
             <div className="ml-auto flex shrink-0 items-center justify-end gap-2">
@@ -518,7 +518,7 @@ function App() {
                 title="로그아웃"
               >
                 <LogOut size={18} />
-                <span className="hidden sm:ml-2 sm:inline">로그아웃</span>
+                <span className="hidden sm:ml-2 sm:inline">LogOut</span>
               </button>
             </div>
           </div>
@@ -575,7 +575,12 @@ function App() {
             <GroupSetup user={user} onGroupChanged={handleGroupChanged} />
           ) : (
             <>
-              <GroupOverview group={activeGroup} completedCount={completedCount} pendingCount={pendingCount} />
+              <GroupOverview
+                group={activeGroup}
+                completedCount={completedCount}
+                pendingCount={pendingCount}
+                onNotice={showNotice}
+              />
 
               <div className={activeTab === "today" ? "block" : "hidden lg:block"}>
                 <TodayPanel
@@ -1276,12 +1281,23 @@ function PushNotificationPanel() {
 function GroupOverview({
   group,
   completedCount,
-  pendingCount
+  pendingCount,
+  onNotice
 }: {
   group: Group;
   completedCount: number;
   pendingCount: number;
+  onNotice: (notice: Notice) => void;
 }) {
+  async function copyInviteCode() {
+    try {
+      await navigator.clipboard.writeText(group.invite_code);
+      onNotice({ tone: "good", text: "초대 코드가 복사되었습니다." });
+    } catch {
+      onNotice({ tone: "warn", text: "초대 코드 복사에 실패했습니다." });
+    }
+  }
+
   return (
     <div className="grid gap-2 md:grid-cols-3">
       <div className="rounded border border-slate-200 bg-white p-3 shadow-sm">
@@ -1289,7 +1305,13 @@ function GroupOverview({
           <ShieldCheck size={18} />
           {group.name}
         </div>
-        <p className="text-sm text-slate-500">초대 코드 {group.invite_code}</p>
+        <button
+          className="mt-1 text-left font-mono text-sm text-slate-500 underline-offset-2 hover:text-teal-700 hover:underline"
+          onClick={copyInviteCode}
+          title="초대 코드 복사"
+        >
+          초대 코드 {group.invite_code}
+        </button>
       </div>
       <MetricCard icon={<Check size={18} />} label="확인" value={`${completedCount}건`} tone="good" />
       <MetricCard icon={<Bell size={18} />} label="미확인" value={`${pendingCount}건`} tone="warn" />
@@ -1615,6 +1637,15 @@ function MemberSettingsPanel({
     }
   }
 
+  async function copyInviteCode() {
+    try {
+      await navigator.clipboard.writeText(group.invite_code);
+      onNotice({ tone: "good", text: "초대 코드가 복사되었습니다." });
+    } catch {
+      onNotice({ tone: "warn", text: "초대 코드 복사에 실패했습니다." });
+    }
+  }
+
   async function leaveGroup() {
     if (!window.confirm(`${group.name} 방에서 나가시겠습니까?`)) {
       return;
@@ -1718,7 +1749,13 @@ function MemberSettingsPanel({
           </form>
           <div className="mt-3 rounded border border-slate-200 bg-white p-2">
             <p className="text-xs text-slate-500">초대 코드</p>
-            <p className="mt-1 font-mono text-sm font-semibold">{group.invite_code}</p>
+            <button
+              className="mt-1 font-mono text-sm font-semibold underline-offset-2 hover:text-teal-700 hover:underline"
+              onClick={copyInviteCode}
+              title="초대 코드 복사"
+            >
+              {group.invite_code}
+            </button>
             <button
               className="mt-2 w-full rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:text-slate-400"
               disabled={group.role !== "OWNER"}
