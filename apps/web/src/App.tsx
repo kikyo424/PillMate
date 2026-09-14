@@ -483,10 +483,10 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white">
-        <div className="mx-auto grid max-w-7xl gap-2 px-4 py-3 sm:flex sm:items-center sm:justify-between sm:gap-4">
-          <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="mx-auto grid max-w-7xl gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-4">
+          <div className="flex min-w-0 items-center gap-3">
             <button
-              className="flex min-w-0 items-center gap-3 text-left"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left"
               onClick={goHome}
               title="홈으로 이동"
             >
@@ -498,7 +498,7 @@ function App() {
                 <p className="truncate text-sm text-slate-500">{user.name}님의 복약 케어</p>
               </div>
             </button>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="ml-auto flex shrink-0 items-center justify-end gap-2">
               <NotificationBell
                 groups={activeTab === "home" ? groups : activeGroup ? [activeGroup] : []}
                 unreadChatByGroup={unreadChatByGroup}
@@ -1361,6 +1361,15 @@ function MedicationCard({
   const done = schedule.status === "COMPLETED";
   const due = isScheduleDue(schedule);
   const disabledReason = done ? "이미 완료되었습니다." : due ? undefined : "알림이 울린 이후에 완료할 수 있습니다.";
+  const confirmMessage = `${schedule.medicine_name} ${schedule.dosage} 복약을 완료 처리할까요?`;
+
+  function confirmCompletion(photo?: File) {
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    onComplete(schedule, photo);
+  }
 
   void currentMinuteKey;
 
@@ -1385,7 +1394,7 @@ function MedicationCard({
         <button
           className="flex min-h-11 items-center justify-center gap-2 rounded bg-teal-700 px-3 py-2 font-medium text-white disabled:bg-slate-300"
           disabled={!canComplete || done || isLoading}
-          onClick={() => onComplete(schedule)}
+          onClick={() => confirmCompletion()}
           title={disabledReason}
         >
           <Check size={18} />
@@ -1409,7 +1418,7 @@ function MedicationCard({
         capture="environment"
         onChange={(event) => {
           const file = event.target.files?.[0];
-          if (file) onComplete(schedule, file);
+          if (file) confirmCompletion(file);
           event.target.value = "";
         }}
       />
@@ -1438,6 +1447,16 @@ function ChatPanel({
 }) {
   const [content, setContent] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const sortedMessages = useMemo(
+    () => [...messages].sort((a, b) => parseServerDate(a.created_at).getTime() - parseServerDate(b.created_at).getTime()),
+    [messages]
+  );
+
+  useEffect(() => {
+    if (showSettings) return;
+    messageEndRef.current?.scrollIntoView({ block: "end" });
+  }, [showSettings, sortedMessages.length, group.id]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1477,11 +1496,12 @@ function ChatPanel({
       ) : (
         <>
           <div className="flex-1 space-y-3 overflow-y-auto p-4">
-            {messages.length === 0 ? (
+            {sortedMessages.length === 0 ? (
               <p className="rounded bg-slate-50 p-3 text-sm text-slate-500">아직 메시지가 없습니다.</p>
             ) : (
-              messages.map((message) => <MessageBubble key={message.id} message={message} currentUserId={user.id} />)
+              sortedMessages.map((message) => <MessageBubble key={message.id} message={message} currentUserId={user.id} />)
             )}
+            <div ref={messageEndRef} />
           </div>
           <form className="flex gap-2 border-t border-slate-200 p-3" onSubmit={submit}>
             <input
@@ -1504,7 +1524,19 @@ function MessageBubble({ message, currentUserId }: { message: ChatMessage; curre
   const mine = message.sender_id === currentUserId;
   const system = message.message_type === "SYSTEM_VERIFICATION";
   const warning = system && message.content.trim().startsWith("경고:");
+  const quietSystem =
+    system && (message.content.trim().endsWith("님을 강퇴했습니다.") || message.content.trim().endsWith("님이 입장했습니다."));
   const timestamp = formatChatTimestamp(message.created_at);
+
+  if (quietSystem) {
+    return (
+      <div className="flex justify-center">
+        <p className="rounded bg-slate-100/60 px-3 py-1 text-xs text-slate-400">
+          {message.content} · {timestamp}
+        </p>
+      </div>
+    );
+  }
 
   if (system) {
     return (

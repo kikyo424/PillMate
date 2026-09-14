@@ -114,10 +114,11 @@ function createVerificationFeed(
   photoUrl: string | null
 ) {
   const displayName = getGroupDisplayName(schedule.group_id, user.id, user.name);
+  const medicineText = `${schedule.medicine_name} ${schedule.dosage}`.trim();
   const content =
     verificationType === "PHOTO"
-      ? `${displayName}님이 사진으로 복약을 인증했습니다.`
-      : `${displayName}님이 복약을 완료했습니다.`;
+      ? `${displayName}님이 ${medicineText} 복약을 사진으로 인증했습니다.`
+      : `${displayName}님이 ${medicineText} 복약을 완료했습니다.`;
 
   return createSystemFeedMessage(io, schedule.group_id, content, photoUrl);
 }
@@ -355,10 +356,18 @@ export function createApiRouter(io: Server) {
         throw new HttpError(404, "Group invite code was not found");
       }
 
-      db.prepare(
-        `INSERT OR IGNORE INTO group_members (group_id, user_id, role, can_edit_schedule)
-         VALUES (?, ?, 'MEMBER', 0)`
-      ).run(group.id, authedReq.user.id);
+      runTransaction(() => {
+        const result = db
+          .prepare(
+            `INSERT OR IGNORE INTO group_members (group_id, user_id, role, can_edit_schedule)
+             VALUES (?, ?, 'MEMBER', 0)`
+          )
+          .run(group.id, authedReq.user.id);
+
+        if (result.changes > 0) {
+          createSystemFeedMessage(io, group.id, `${authedReq.user.name}님이 입장했습니다.`);
+        }
+      });
 
       res.status(201).json({ group });
     })
@@ -428,8 +437,13 @@ export function createApiRouter(io: Server) {
       const canEditSchedule = optionalBoolean(req.body.can_edit_schedule, false);
 
       const member = db
-        .prepare("SELECT id, role FROM group_members WHERE id = ? AND group_id = ?")
-        .get(memberId, groupId) as { id: number; role: string } | undefined;
+        .prepare(
+          `SELECT gm.id, gm.role, gm.user_id, gm.nickname, u.name
+           FROM group_members gm
+           JOIN users u ON u.id = gm.user_id
+           WHERE gm.id = ? AND gm.group_id = ?`
+        )
+        .get(memberId, groupId) as { id: number; role: string; user_id: number; nickname: string | null; name: string } | undefined;
 
       if (!member) {
         throw new HttpError(404, "Group member was not found");
@@ -458,8 +472,13 @@ export function createApiRouter(io: Server) {
       const memberId = requireInt(req.params.memberId, "memberId");
 
       const member = db
-        .prepare("SELECT id, role FROM group_members WHERE id = ? AND group_id = ?")
-        .get(memberId, groupId) as { id: number; role: string } | undefined;
+        .prepare(
+          `SELECT gm.id, gm.role, gm.nickname, u.name
+           FROM group_members gm
+           JOIN users u ON u.id = gm.user_id
+           WHERE gm.id = ? AND gm.group_id = ?`
+        )
+        .get(memberId, groupId) as { id: number; role: string; nickname: string | null; name: string } | undefined;
 
       if (!member) {
         throw new HttpError(404, "Group member was not found");
@@ -469,7 +488,13 @@ export function createApiRouter(io: Server) {
         throw new HttpError(400, "Owner cannot be removed from the group");
       }
 
-      db.prepare("DELETE FROM group_members WHERE id = ? AND group_id = ?").run(memberId, groupId);
+      const displayName = member.nickname?.trim() || member.name;
+
+      runTransaction(() => {
+        db.prepare("DELETE FROM group_members WHERE id = ? AND group_id = ?").run(memberId, groupId);
+        createSystemFeedMessage(io, groupId, `${displayName}님을 강퇴했습니다.`);
+      });
+
       res.status(204).send();
     })
   );
@@ -693,7 +718,7 @@ export function createApiRouter(io: Server) {
 
       await sendPushToGroup(schedule.group_id, {
         title: "복약 완료",
-        body: `${displayName}님이 복약을 완료했습니다.`,
+        body: `${displayName}님이 ${schedule.medicine_name} ${schedule.dosage} 복약을 완료했습니다.`,
         kind: "INTAKE_COMPLETED",
         url: "/"
       });
