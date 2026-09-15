@@ -6,6 +6,7 @@ import type { ScheduleRow } from "../db/types.js";
 import { buildScheduledTime, getTodayCode } from "../utils/dates.js";
 import { createSystemFeedMessage } from "./feed.js";
 import { sendPushToGroup, sendPushToUser } from "./notifications.js";
+import { buildMedicationDueNotification, buildMedicationEscalatedNotification } from "./pushMessages.js";
 
 type DueScheduleRow = ScheduleRow & {
   target_user_name: string;
@@ -107,8 +108,10 @@ async function notifyDueSchedule(io: Server, schedule: DueScheduleRow, now: Date
   io.to(`user:${schedule.target_user_id}`).emit("intake:due", payload);
 
   await sendPushToUser(schedule.target_user_id, {
-    title: "복약 시간입니다",
-    body: `${schedule.medicine_name} ${schedule.dosage} 복용 시간이에요.`,
+    ...buildMedicationDueNotification({
+      medicineName: schedule.medicine_name,
+      dosage: schedule.dosage
+    }),
     kind: "INTAKE_DUE",
     url: "/"
   });
@@ -127,7 +130,12 @@ async function escalateMissedIntake(io: Server, intake: PendingEscalationRow) {
     return;
   }
 
-  const content = `경고: ${intake.target_user_name}님이 아직 ${intake.medicine_name} 복약을 완료하지 않았습니다.`;
+  const missedNotification = buildMedicationEscalatedNotification({
+    displayName: intake.target_user_name,
+    medicineName: intake.medicine_name,
+    dosage: intake.dosage
+  });
+  const content = `경고: ${missedNotification.body}`;
   const payload = {
     intake_log_id: intake.id,
     schedule_id: intake.schedule_id,
@@ -141,8 +149,7 @@ async function escalateMissedIntake(io: Server, intake: PendingEscalationRow) {
   io.to(`group:${intake.group_id}`).emit("intake:escalated", payload);
 
   await sendPushToGroup(intake.group_id, {
-    title: "복약 미확인 경고",
-    body: content,
+    ...missedNotification,
     kind: "INTAKE_ESCALATED",
     url: "/"
   });

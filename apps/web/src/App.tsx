@@ -19,6 +19,7 @@ import {
   UserPlus,
   Users
 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import { ApiError, apiBaseUrl, ChatMessage, Group, Member, pillmateApi, Schedule, User } from "./api";
@@ -118,6 +119,22 @@ function isScheduleDue(schedule: Schedule, now = new Date()) {
   return scheduled.getTime() <= now.getTime();
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function isIosDevice() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+function isStandaloneWebApp() {
+  return window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+}
+
+function showActionError(error: unknown, fallback: string) {
+  window.alert(getErrorMessage(error, fallback));
+}
+
 function urlBase64ToUint8Array(value: string) {
   const padding = "=".repeat((4 - (value.length % 4)) % 4);
   const base64 = `${value}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
@@ -131,7 +148,34 @@ function urlBase64ToUint8Array(value: string) {
   return output;
 }
 
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.left = "-9999px";
+  input.style.top = "0";
+  document.body.appendChild(input);
+
+  input.focus();
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+
+  const copied = document.execCommand("copy");
+  document.body.removeChild(input);
+
+  if (!copied) {
+    throw new Error("Copy failed");
+  }
+}
+
 function App() {
+  const queryClient = useQueryClient();
   const [user, setUser] = useState<User | null>(() => readStoredUser());
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<number | null>(() => {
@@ -154,6 +198,42 @@ function App() {
     () => groups.find((group) => group.id === activeGroupId) ?? null,
     [activeGroupId, groups]
   );
+  const groupsQuery = useQuery({
+    queryKey: ["groups", user?.id],
+    enabled: Boolean(user),
+    queryFn: async () => {
+      if (!user) return [];
+      const result = await pillmateApi.listGroups(user.id);
+      return result.groups;
+    }
+  });
+  const membersQuery = useQuery({
+    queryKey: ["members", user?.id, activeGroup?.id],
+    enabled: Boolean(user && activeGroup),
+    queryFn: async () => {
+      if (!user || !activeGroup) return [];
+      const result = await pillmateApi.listMembers(user.id, activeGroup.id);
+      return result.members;
+    }
+  });
+  const todaySchedulesQuery = useQuery({
+    queryKey: ["todaySchedules", user?.id, activeGroup?.id, todayKey],
+    enabled: Boolean(user && activeGroup),
+    queryFn: async () => {
+      if (!user || !activeGroup) return [];
+      const result = await pillmateApi.listTodaySchedules(user.id, activeGroup.id);
+      return result.schedules;
+    }
+  });
+  const schedulesQuery = useQuery({
+    queryKey: ["schedules", user?.id, activeGroup?.id],
+    enabled: Boolean(user && activeGroup),
+    queryFn: async () => {
+      if (!user || !activeGroup) return [];
+      const result = await pillmateApi.listSchedules(user.id, activeGroup.id);
+      return result.schedules;
+    }
+  });
   const canManage = activeGroup?.role === "OWNER" || activeGroup?.can_edit_schedule === 1;
   const completedCount = todaySchedules.filter((schedule) => schedule.status === "COMPLETED").length;
   const pendingCount = todaySchedules.length - completedCount;
@@ -197,7 +277,8 @@ function App() {
     setUnreadChatByGroup({});
     setUnreadIntakeByGroup({});
     setAppNotifications([]);
-  }, []);
+    queryClient.clear();
+  }, [queryClient]);
 
   const clearCurrentSession = useCallback(() => {
     localStorage.removeItem("pillmate:user");
@@ -212,7 +293,8 @@ function App() {
     setUnreadChatByGroup({});
     setUnreadIntakeByGroup({});
     setActiveTab("home");
-  }, []);
+    queryClient.clear();
+  }, [queryClient]);
 
   const handleDataError = useCallback(
     (error: unknown) => {
@@ -221,37 +303,96 @@ function App() {
         return;
       }
 
-      showNotice({ tone: "warn", text: error instanceof Error ? error.message : "데이터를 불러오지 못했습니다." });
+      console.error(getErrorMessage(error, "데이터를 불러오지 못했습니다."));
     },
-    [resetStoredSession, showNotice]
+    [resetStoredSession]
   );
 
-  const refreshGroupData = useCallback(async () => {
-    if (!user || !activeGroup) return;
-    const [memberResult, todayResult, scheduleResult, messageResult] = await Promise.all([
-      pillmateApi.listMembers(user.id, activeGroup.id),
-      pillmateApi.listTodaySchedules(user.id, activeGroup.id),
-      pillmateApi.listSchedules(user.id, activeGroup.id),
-      pillmateApi.listMessages(user.id, activeGroup.id)
-    ]);
+  useEffect(() => {
+    if (!groupsQuery.data) return;
 
-    setMembers(memberResult.members);
-    setTodaySchedules(todayResult.schedules);
-    setAllSchedules(scheduleResult.schedules);
-    setMessages(messageResult.messages);
-  }, [activeGroup, todayKey, user]);
+    setGroups(groupsQuery.data);
 
-  const refreshGroups = useCallback(async () => {
-    if (!user) return;
-    const result = await pillmateApi.listGroups(user.id);
-    setGroups(result.groups);
-
-    if (activeGroupId && !result.groups.some((group) => group.id === activeGroupId)) {
+    if (activeGroupId && !groupsQuery.data.some((group) => group.id === activeGroupId)) {
       setActiveGroupId(null);
       localStorage.removeItem("pillmate:groupId");
       setActiveTab("home");
     }
-  }, [activeGroupId, user]);
+  }, [activeGroupId, groupsQuery.data]);
+
+  useEffect(() => {
+    if (!membersQuery.data) return;
+    setMembers(membersQuery.data);
+  }, [membersQuery.data]);
+
+  useEffect(() => {
+    if (!todaySchedulesQuery.data) return;
+    setTodaySchedules(todaySchedulesQuery.data);
+  }, [todaySchedulesQuery.data]);
+
+  useEffect(() => {
+    if (!schedulesQuery.data) return;
+    setAllSchedules(schedulesQuery.data);
+  }, [schedulesQuery.data]);
+
+  useEffect(() => {
+    if (groupsQuery.error) {
+      handleDataError(groupsQuery.error);
+    }
+  }, [groupsQuery.error, handleDataError]);
+
+  useEffect(() => {
+    if (membersQuery.error) {
+      handleDataError(membersQuery.error);
+    }
+  }, [membersQuery.error, handleDataError]);
+
+  useEffect(() => {
+    if (todaySchedulesQuery.error) {
+      handleDataError(todaySchedulesQuery.error);
+    }
+  }, [todaySchedulesQuery.error, handleDataError]);
+
+  useEffect(() => {
+    if (schedulesQuery.error) {
+      handleDataError(schedulesQuery.error);
+    }
+  }, [schedulesQuery.error, handleDataError]);
+
+  const refreshGroupData = useCallback(async () => {
+    if (!user || !activeGroup) return;
+    const messageResult = await pillmateApi.listMessages(user.id, activeGroup.id);
+
+    setMessages(messageResult.messages);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["members", user.id, activeGroup.id] }),
+      queryClient.invalidateQueries({ queryKey: ["todaySchedules", user.id, activeGroup.id] }),
+      queryClient.invalidateQueries({ queryKey: ["schedules", user.id, activeGroup.id] })
+    ]);
+  }, [activeGroup, queryClient, user]);
+
+  const refreshGroups = useCallback(async () => {
+    if (!user) return;
+    const nextGroups = await queryClient.fetchQuery({
+      queryKey: ["groups", user.id],
+      queryFn: async () => {
+        const result = await pillmateApi.listGroups(user.id);
+        return result.groups;
+      }
+    });
+
+    setGroups(nextGroups);
+
+    if (activeGroupId && !nextGroups.some((group) => group.id === activeGroupId)) {
+      setActiveGroupId(null);
+      localStorage.removeItem("pillmate:groupId");
+      setActiveTab("home");
+    }
+  }, [activeGroupId, queryClient, user]);
+
+  const refreshVisibleData = useCallback(async () => {
+    await Promise.all([refreshGroups(), refreshGroupData()]);
+  }, [refreshGroupData, refreshGroups]);
 
   useEffect(() => {
     refreshGroups().catch(handleDataError);
@@ -368,7 +509,6 @@ function App() {
   async function handleUserCreated(createdUser: User) {
     setUser(createdUser);
     localStorage.setItem("pillmate:user", JSON.stringify(createdUser));
-    showNotice({ tone: "good", text: `${createdUser.name}님으로 시작합니다.` });
   }
 
   async function handleGroupChanged(group: Group) {
@@ -376,7 +516,6 @@ function App() {
     setActiveGroupId(group.id);
     localStorage.setItem("pillmate:groupId", String(group.id));
     setActiveTab("today");
-    showNotice({ tone: "good", text: `${group.name} 그룹에 연결되었습니다.` });
   }
 
   function goHome() {
@@ -451,11 +590,10 @@ function App() {
         }
       }
 
-      showNotice({ tone: "info", text: "로그아웃되었습니다." });
       await authClient.signOut();
       clearCurrentSession();
     } catch (error) {
-      showNotice({ tone: "warn", text: error instanceof Error ? error.message : "로그아웃에 실패했습니다." });
+      showActionError(error, "로그아웃에 실패했습니다.");
     } finally {
       setIsLoading(false);
     }
@@ -467,10 +605,9 @@ function App() {
 
     try {
       await pillmateApi.completeSchedule(user.id, schedule.id, photo, schedule.scheduled_time);
-      await refreshGroupData();
-      showNotice({ tone: "good", text: "복약 완료가 피드에 공유되었습니다." });
+      await refreshVisibleData();
     } catch (error) {
-      showNotice({ tone: "warn", text: error instanceof Error ? error.message : "복약 완료에 실패했습니다." });
+      showActionError(error, "복약 완료에 실패했습니다.");
     } finally {
       setIsLoading(false);
     }
@@ -481,8 +618,8 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-950">
-      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white">
+    <div className="flex min-h-screen flex-col bg-slate-50 text-slate-950">
+      <header className="sticky top-0 z-20 shrink-0 border-b border-slate-200 bg-white">
         <div className="mx-auto grid max-w-7xl gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-4">
           <div className="flex min-w-0 items-center gap-3">
             <button
@@ -542,8 +679,12 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-7xl gap-4 px-4 pb-24 pt-3 lg:grid-cols-[minmax(0,1fr)_390px] lg:pb-6 lg:pt-4">
-        <section className="space-y-4">
+      <main
+        className={`mx-auto grid w-full max-w-7xl flex-1 gap-4 overflow-hidden px-4 pt-3 lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_390px] lg:pb-6 lg:pt-4 ${
+          activeGroup && activeTab === "chat" ? "pb-20" : "pb-24"
+        }`}
+      >
+        <section className={`min-h-0 min-w-0 max-w-full space-y-4 overflow-hidden ${activeGroup && activeTab === "chat" ? "hidden lg:block" : ""}`}>
           {activeTab === "home" ? (
             <HomePanel
               user={user}
@@ -574,12 +715,12 @@ function App() {
           ) : !activeGroup ? (
             <GroupSetup user={user} onGroupChanged={handleGroupChanged} />
           ) : (
-            <>
+            <div className="min-w-0 max-w-full space-y-4 overflow-hidden">
               <GroupOverview
                 group={activeGroup}
+                canManage={canManage}
                 completedCount={completedCount}
                 pendingCount={pendingCount}
-                onNotice={showNotice}
               />
 
               <div className={activeTab === "today" ? "block" : "hidden lg:block"}>
@@ -599,25 +740,23 @@ function App() {
                   members={members}
                   schedules={allSchedules}
                   canManage={canManage}
-                  onChanged={refreshGroupData}
-                  onNotice={showNotice}
+                  onChanged={refreshVisibleData}
                 />
               </div>
-            </>
+            </div>
           )}
         </section>
 
         {activeGroup && activeTab !== "home" && (
-          <aside className={activeTab === "chat" ? "block" : "hidden lg:block"}>
+          <aside className={activeTab === "chat" ? "block min-h-0" : "hidden lg:block"}>
             <ChatPanel
               user={user}
               group={activeGroup}
               members={members}
               messages={messages}
-              onChanged={refreshGroupData}
-              onGroupsChanged={refreshGroups}
+              onChanged={refreshVisibleData}
+              onGroupsChanged={refreshVisibleData}
               onMessageSent={refreshGroupData}
-              onNotice={showNotice}
             />
           </aside>
         )}
@@ -950,21 +1089,23 @@ function HomePanel({
   onGroupChanged: (group: Group) => void;
 }) {
   return (
-    <section className="space-y-4">
-      <div className="flex min-h-[520px] flex-col rounded border border-slate-200 bg-white p-4 shadow-sm">
+    <section className="space-y-3 sm:space-y-4">
+      <div className="flex max-h-[46dvh] min-h-[220px] flex-col rounded border border-slate-200 bg-white p-3 shadow-sm sm:max-h-none sm:min-h-[360px] sm:p-4 lg:min-h-[520px]">
         <div className="mb-3 flex items-center gap-2">
           <Home size={20} className="text-teal-700" />
           <h2 className="font-semibold">PillMate</h2>
         </div>
-        <div className="grid gap-2">
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           {groups.map((group) => {
             const selected = group.id === activeGroupId;
             const unreadCount = unreadChatByGroup[group.id] ?? 0;
             const intakeCount = unreadIntakeByGroup[group.id] ?? 0;
+            const totalUnread = unreadCount + intakeCount;
+            const roleLabel = group.role === "OWNER" ? "Owner" : group.can_edit_schedule ? "편집 가능" : "Member";
             return (
               <button
                 key={group.id}
-                className={`grid gap-2 rounded border px-3 py-3 text-left sm:grid-cols-[minmax(0,1fr)_auto] ${
+                className={`grid gap-3 rounded border px-3 py-3 text-left sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center ${
                   selected ? "border-teal-700 bg-teal-50" : "border-slate-200 bg-white hover:bg-slate-50"
                 }`}
                 onClick={() => onSelectGroup(group.id, "today")}
@@ -972,11 +1113,17 @@ function HomePanel({
                 <span className="min-w-0">
                   <span className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-medium">{group.name}</span>
-                    <Badge count={unreadCount + intakeCount} />
+                    <Badge count={totalUnread} />
                   </span>
-                  <span className="mt-1 block text-sm text-slate-500">초대 코드 {group.invite_code}</span>
+                  <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500">
+                    <span>{roleLabel}</span>
+                    <span className="text-slate-300">·</span>
+                    <span>{totalUnread > 0 ? `새 알림 ${totalUnread}건` : "새 알림 없음"}</span>
+                  </span>
                 </span>
-                <span className={`text-sm font-medium ${selected ? "text-teal-700" : "text-slate-500"}`}>
+                <span className={`justify-self-start rounded px-2 py-1 text-sm font-medium sm:justify-self-end ${
+                  selected ? "bg-teal-100 text-teal-700" : "bg-slate-100 text-slate-600"
+                }`}>
                   {selected ? "선택됨" : "들어가기"}
                 </span>
               </button>
@@ -1055,7 +1202,7 @@ function TodayGroupPanel({
 
   if (groups.length === 0) {
     return (
-      <section className="rounded border border-dashed border-slate-300 bg-white p-8 text-center">
+      <section className="rounded border border-dashed border-slate-300 bg-white p-5 text-center sm:p-8">
         <Home className="mx-auto text-slate-400" size={32} />
         <h2 className="mt-3 text-lg font-semibold">참여 중인 방이 없습니다.</h2>
         <p className="mt-1 text-sm text-slate-500">홈에서 방을 만들거나 초대 코드로 참여해주세요.</p>
@@ -1069,7 +1216,7 @@ function TodayGroupPanel({
         <CalendarClock size={20} className="text-teal-700" />
         <h2 className="font-semibold">오늘</h2>
       </div>
-      <div className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
+      <div className="max-h-[calc(100dvh-260px)] space-y-2 overflow-y-auto pr-1 sm:max-h-[520px]">
         {groups.map((group) => {
           const summary = summaries[group.id];
           const unreadCount = unreadByGroup[group.id] ?? 0;
@@ -1124,7 +1271,7 @@ function GroupNotificationPanel({
 }) {
   if (groups.length === 0) {
     return (
-      <section className="rounded border border-dashed border-slate-300 bg-white p-8 text-center">
+      <section className="rounded border border-dashed border-slate-300 bg-white p-5 text-center sm:p-8">
         <Home className="mx-auto text-slate-400" size={32} />
         <h2 className="mt-3 text-lg font-semibold">참여 중인 방이 없습니다.</h2>
         <p className="mt-1 text-sm text-slate-500">홈에서 방을 만들거나 초대 코드로 참여해주세요.</p>
@@ -1140,7 +1287,7 @@ function GroupNotificationPanel({
         {icon}
         <h2 className="font-semibold">{title}</h2>
       </div>
-      <div className="max-h-[520px] space-y-2 overflow-y-auto pr-1">
+      <div className="max-h-[calc(100dvh-260px)] space-y-2 overflow-y-auto pr-1 sm:max-h-[520px]">
         {groups.map((group) => {
           const unreadCount = unreadByGroup[group.id] ?? 0;
 
@@ -1174,8 +1321,15 @@ function PushNotificationPanel() {
   const [message, setMessage] = useState("");
 
   const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const needsIosInstall = isIosDevice() && !isStandaloneWebApp();
 
   const refreshSubscriptionState = useCallback(async () => {
+    if (needsIosInstall) {
+      setStatus("disabled");
+      setMessage("iPhone에서 앱이 꺼져 있어도 알림을 받으려면 Safari 공유 버튼에서 홈 화면에 추가한 뒤 실행해주세요.");
+      return;
+    }
+
     if (!supported) {
       setStatus("unsupported");
       setMessage("이 브라우저는 푸시 알림을 지원하지 않습니다.");
@@ -1194,7 +1348,7 @@ function PushNotificationPanel() {
     const subscription = await registration.pushManager.getSubscription();
     setStatus(subscription ? "subscribed" : "ready");
     setMessage(subscription ? "이 기기에서 알림을 받고 있습니다." : "이 기기에서 복약과 채팅 알림을 받을 수 있습니다.");
-  }, [supported]);
+  }, [needsIosInstall, supported]);
 
   useEffect(() => {
     refreshSubscriptionState().catch((error) => {
@@ -1205,6 +1359,12 @@ function PushNotificationPanel() {
 
   async function enableNotifications() {
     try {
+      if (needsIosInstall) {
+        setStatus("disabled");
+        setMessage("홈 화면에 추가한 PillMate 앱에서만 iPhone 알림을 켤 수 있습니다.");
+        return;
+      }
+
       const keyStatus = await pillmateApi.getVapidPublicKey();
 
       if (!keyStatus.enabled || !keyStatus.publicKey) {
@@ -1256,6 +1416,13 @@ function PushNotificationPanel() {
             <h2 className="font-semibold">기기 알림</h2>
           </div>
           <p className="mt-1 text-sm text-slate-500">{message || "알림 상태를 확인하고 있습니다."}</p>
+          {needsIosInstall && (
+            <ol className="mt-3 space-y-1 rounded bg-slate-50 p-3 text-sm text-slate-600">
+              <li>1. Safari 하단 공유 버튼을 누르세요.</li>
+              <li>2. 홈 화면에 추가를 선택하세요.</li>
+              <li>3. 홈 화면의 PillMate 아이콘으로 다시 실행하세요.</li>
+            </ol>
+          )}
         </div>
         {status === "subscribed" ? (
           <button
@@ -1280,38 +1447,39 @@ function PushNotificationPanel() {
 
 function GroupOverview({
   group,
+  canManage,
   completedCount,
-  pendingCount,
-  onNotice
+  pendingCount
 }: {
   group: Group;
+  canManage: boolean;
   completedCount: number;
   pendingCount: number;
-  onNotice: (notice: Notice) => void;
 }) {
   async function copyInviteCode() {
     try {
-      await navigator.clipboard.writeText(group.invite_code);
-      onNotice({ tone: "good", text: "초대 코드가 복사되었습니다." });
+      await copyTextToClipboard(group.invite_code);
     } catch {
-      onNotice({ tone: "warn", text: "초대 코드 복사에 실패했습니다." });
+      window.alert("초대 코드 복사에 실패했습니다.");
     }
   }
 
   return (
-    <div className="grid gap-2 md:grid-cols-3">
+    <div className="grid min-w-0 max-w-full gap-2 overflow-hidden md:grid-cols-3">
       <div className="rounded border border-slate-200 bg-white p-3 shadow-sm">
-        <div className="flex items-center gap-2mt-1 truncate text-lg font-semibold">
+        <div className="flex min-w-0 items-center gap-2 text-lg font-semibold">
           <ShieldCheck size={18} />
-          {group.name}
+          <span className="truncate">{group.name}</span>
         </div>
-        <button
-          className="mt-1 text-left font-mono text-sm text-slate-500 underline-offset-2 hover:text-teal-700 hover:underline"
-          onClick={copyInviteCode}
-          title="초대 코드 복사"
-        >
-          초대 코드 {group.invite_code}
-        </button>
+        {canManage && (
+          <button
+            className="mt-1 text-left font-mono text-sm text-slate-500 underline-offset-2 hover:text-teal-700 hover:underline"
+            onClick={copyInviteCode}
+            title="초대 코드 복사"
+          >
+            초대 코드 {group.invite_code}
+          </button>
+        )}
       </div>
       <MetricCard icon={<Check size={18} />} label="확인" value={`${completedCount}건`} tone="good" />
       <MetricCard icon={<Bell size={18} />} label="미확인" value={`${pendingCount}건`} tone="warn" />
@@ -1332,9 +1500,14 @@ function TodayPanel({
   currentMinuteKey: string;
   onComplete: (schedule: Schedule, photo?: File) => void;
 }) {
+  const [showMineOnly, setShowMineOnly] = useState(false);
+  const visibleSchedules = showMineOnly
+    ? schedules.filter((schedule) => schedule.target_user_id === currentUserId)
+    : schedules;
+
   if (schedules.length === 0) {
     return (
-      <section className="rounded border border-dashed border-slate-300 bg-white p-8 text-center">
+      <section className="rounded border border-dashed border-slate-300 bg-white p-5 text-center sm:p-8">
         <CalendarClock className="mx-auto text-slate-400" size={32} />
         <h2 className="mt-3 text-lg font-semibold">오늘 등록된 복약이 없습니다.</h2>
         <p className="mt-1 text-sm text-slate-500">스케줄 관리에서 복약 일정을 추가할 수 있습니다.</p>
@@ -1344,24 +1517,45 @@ function TodayPanel({
   }
 
   return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2">
-        <CalendarClock size={20} className="text-teal-700" />
-        <h2 className="text-lg font-semibold">오늘의 복약</h2>
+    <section className="min-w-0 max-w-full space-y-3 overflow-hidden">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <CalendarClock className="shrink-0 text-teal-700" size={20} />
+          <h2 className="truncate text-lg font-semibold">오늘의 복약</h2>
+        </div>
+        <button
+          className={`shrink-0 rounded border px-3 py-1.5 text-sm font-medium ${
+            showMineOnly
+              ? "border-teal-700 bg-teal-700 text-white"
+              : "border-slate-300 bg-white text-slate-700"
+          }`}
+          onClick={() => setShowMineOnly((current) => !current)}
+          type="button"
+        >
+          내 알림
+        </button>
       </div>
-      <div className="flex snap-x gap-3 overflow-x-auto pb-3">
-        {schedules.map((schedule) => (
-          <div key={schedule.id} className="w-[calc(100vw-2rem)] max-w-sm shrink-0 snap-start sm:w-80">
-            <MedicationCard
-              schedule={schedule}
-              canComplete={schedule.target_user_id === currentUserId && isScheduleDue(schedule)}
-              isLoading={isLoading}
-              currentMinuteKey={currentMinuteKey}
-              onComplete={onComplete}
-            />
+      {visibleSchedules.length === 0 ? (
+        <p className="rounded border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500">
+          나에게 해당하는 복약 알림이 없습니다.
+        </p>
+      ) : (
+        <div className="w-full max-w-full overflow-x-auto overflow-y-visible pb-3">
+          <div className="flex w-max snap-x snap-mandatory gap-3">
+            {visibleSchedules.map((schedule) => (
+              <div key={schedule.id} className="w-[calc(100vw-2rem)] shrink-0 snap-start sm:w-80">
+                <MedicationCard
+                  schedule={schedule}
+                  canComplete={schedule.target_user_id === currentUserId && isScheduleDue(schedule)}
+                  isLoading={isLoading}
+                  currentMinuteKey={currentMinuteKey}
+                  onComplete={onComplete}
+                />
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1396,40 +1590,40 @@ function MedicationCard({
   void currentMinuteKey;
 
   return (
-    <article className="flex h-full min-h-56 flex-col rounded border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
+    <article className="flex h-full min-h-56 min-w-0 flex-col rounded border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+      <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm text-slate-500">{schedule.target_user_name}</p>
-          <h3 className="mt-1 text-xl font-semibold">{schedule.medicine_name}</h3>
-          <p className="mt-1 text-sm text-slate-600">{schedule.dosage}</p>
+          <h3 className="mt-1 break-words text-lg font-semibold sm:text-xl">{schedule.medicine_name}</h3>
+          <p className="mt-1 break-words text-sm text-slate-600">{schedule.dosage}</p>
         </div>
         <span className={`shrink-0 rounded px-2 py-1 text-sm font-medium ${done ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
           {statusLabel(schedule.status)}
         </span>
       </div>
-      <div className="mt-auto flex items-center gap-2 pt-4 text-slate-700">
+      <div className="mt-auto flex flex-wrap items-center gap-2 pt-4 text-slate-700">
         <Bell size={18} />
-        <span className="text-2xl font-semibold">{schedule.intake_time}</span>
+        <span className="text-xl font-semibold sm:text-2xl">{schedule.intake_time}</span>
         {schedule.completed_at && <span className="text-sm text-slate-500">완료 {formatTime(schedule.completed_at)}</span>}
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2">
         <button
-          className="flex min-h-11 items-center justify-center gap-2 rounded bg-teal-700 px-3 py-2 font-medium text-white disabled:bg-slate-300"
+          className="flex min-h-11 min-w-0 items-center justify-center gap-1 rounded bg-teal-700 px-2 py-2 text-sm font-medium text-white disabled:bg-slate-300 sm:gap-2 sm:px-3 sm:text-base"
           disabled={!canComplete || done || isLoading}
           onClick={() => confirmCompletion()}
           title={disabledReason}
         >
-          <Check size={18} />
-          먹었어요
+          <Check className="shrink-0" size={18} />
+          <span className="truncate">먹었어요</span>
         </button>
         <button
-          className="flex min-h-11 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-3 py-2 font-medium text-slate-800 disabled:text-slate-400"
+          className="flex min-h-11 min-w-0 items-center justify-center gap-1 rounded border border-slate-300 bg-white px-2 py-2 text-sm font-medium text-slate-800 disabled:text-slate-400 sm:gap-2 sm:px-3 sm:text-base"
           disabled={!canComplete || done || isLoading}
           onClick={() => photoInputRef.current?.click()}
           title={disabledReason}
         >
-          <Camera size={18} />
-          사진 인증
+          <Camera className="shrink-0" size={18} />
+          <span className="truncate">사진 인증</span>
         </button>
       </div>
       <input
@@ -1455,8 +1649,7 @@ function ChatPanel({
   messages,
   onChanged,
   onGroupsChanged,
-  onMessageSent,
-  onNotice
+  onMessageSent
 }: {
   user: User;
   group: Group;
@@ -1465,7 +1658,6 @@ function ChatPanel({
   onChanged: () => void;
   onGroupsChanged: () => void;
   onMessageSent: () => void;
-  onNotice: (notice: Notice) => void;
 }) {
   const [content, setContent] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -1474,11 +1666,16 @@ function ChatPanel({
     () => [...messages].sort((a, b) => parseServerDate(a.created_at).getTime() - parseServerDate(b.created_at).getTime()),
     [messages]
   );
+  const latestMessageId = sortedMessages.at(-1)?.id ?? 0;
 
   useEffect(() => {
     if (showSettings) return;
-    messageEndRef.current?.scrollIntoView({ block: "end" });
-  }, [showSettings, sortedMessages.length, group.id]);
+    const frameId = window.requestAnimationFrame(() => {
+      messageEndRef.current?.scrollIntoView({ block: "end", inline: "nearest" });
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [showSettings, latestMessageId, group.id]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1490,7 +1687,7 @@ function ChatPanel({
   }
 
   return (
-    <section className="flex h-[calc(100dvh-168px)] min-h-[420px] flex-col rounded border border-slate-200 bg-white shadow-sm lg:h-[calc(100vh-112px)] lg:min-h-[520px]">
+    <section className="flex h-[calc(100dvh-190px)] min-h-0 flex-col rounded border border-slate-200 bg-white shadow-sm sm:h-[calc(100dvh-168px)] lg:h-[calc(100vh-112px)] lg:min-h-[520px]">
       <div className="border-b border-slate-200 p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -1513,11 +1710,10 @@ function ChatPanel({
           members={members}
           onChanged={onChanged}
           onGroupsChanged={onGroupsChanged}
-          onNotice={onNotice}
         />
       ) : (
         <>
-          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4">
             {sortedMessages.length === 0 ? (
               <p className="rounded bg-slate-50 p-3 text-sm text-slate-500">아직 메시지가 없습니다.</p>
             ) : (
@@ -1525,7 +1721,7 @@ function ChatPanel({
             )}
             <div ref={messageEndRef} />
           </div>
-          <form className="flex gap-2 border-t border-slate-200 p-3" onSubmit={submit}>
+          <form className="shrink-0 flex gap-2 border-t border-slate-200 bg-white p-3" onSubmit={submit}>
             <input
               className="min-w-0 flex-1 rounded border border-slate-300 px-3 py-2"
               placeholder="응원 메시지"
@@ -1592,15 +1788,13 @@ function MemberSettingsPanel({
   group,
   members,
   onChanged,
-  onGroupsChanged,
-  onNotice
+  onGroupsChanged
 }: {
   user: User;
   group: Group;
   members: Member[];
   onChanged: () => void;
   onGroupsChanged: () => void;
-  onNotice: (notice: Notice) => void;
 }) {
   const [editingMemberId, setEditingMemberId] = useState<number | null>(null);
   const [memberNickname, setMemberNickname] = useState("");
@@ -1617,9 +1811,8 @@ function MemberSettingsPanel({
     try {
       await pillmateApi.updateGroup(user.id, group.id, groupName);
       await onGroupsChanged();
-      onNotice({ tone: "good", text: "방 이름이 변경되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "방 이름 변경에 실패했습니다." });
+      showActionError(error, "방 이름 변경에 실패했습니다.");
     }
   }
 
@@ -1631,18 +1824,16 @@ function MemberSettingsPanel({
     try {
       await pillmateApi.regenerateInviteCode(user.id, group.id);
       await onGroupsChanged();
-      onNotice({ tone: "good", text: "초대 코드가 새로 생성되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "초대 코드 재생성에 실패했습니다." });
+      showActionError(error, "초대 코드 재생성에 실패했습니다.");
     }
   }
 
   async function copyInviteCode() {
     try {
-      await navigator.clipboard.writeText(group.invite_code);
-      onNotice({ tone: "good", text: "초대 코드가 복사되었습니다." });
+      await copyTextToClipboard(group.invite_code);
     } catch {
-      onNotice({ tone: "warn", text: "초대 코드 복사에 실패했습니다." });
+      window.alert("초대 코드 복사에 실패했습니다.");
     }
   }
 
@@ -1654,9 +1845,8 @@ function MemberSettingsPanel({
     try {
       await pillmateApi.leaveGroup(user.id, group.id);
       await onGroupsChanged();
-      onNotice({ tone: "good", text: "방에서 나갔습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "방 나가기에 실패했습니다." });
+      showActionError(error, "방 나가기에 실패했습니다.");
     }
   }
 
@@ -1668,9 +1858,8 @@ function MemberSettingsPanel({
     try {
       await pillmateApi.deleteGroup(user.id, group.id);
       await onGroupsChanged();
-      onNotice({ tone: "good", text: "방이 삭제되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "방 삭제에 실패했습니다." });
+      showActionError(error, "방 삭제에 실패했습니다.");
     }
   }
 
@@ -1679,7 +1868,7 @@ function MemberSettingsPanel({
       await pillmateApi.updatePermission(user.id, group.id, member.id, member.can_edit_schedule !== 1);
       await onChanged();
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "권한 변경에 실패했습니다." });
+      showActionError(error, "권한 변경에 실패했습니다.");
     }
   }
 
@@ -1691,9 +1880,8 @@ function MemberSettingsPanel({
     try {
       await pillmateApi.removeMember(user.id, group.id, member.id);
       await onChanged();
-      onNotice({ tone: "good", text: "구성원을 내보냈습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "구성원 내보내기에 실패했습니다." });
+      showActionError(error, "구성원 내보내기에 실패했습니다.");
     }
   }
 
@@ -1718,9 +1906,8 @@ function MemberSettingsPanel({
       await pillmateApi.updateMyNickname(user.id, group.id, memberNickname);
       await onChanged();
       closeMemberSettings();
-      onNotice({ tone: "good", text: "이 방에서 보이는 닉네임이 변경되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "닉네임 변경에 실패했습니다." });
+      showActionError(error, "닉네임 변경에 실패했습니다.");
     }
   }
 
@@ -1747,23 +1934,25 @@ function MemberSettingsPanel({
               이름 저장
             </button>
           </form>
-          <div className="mt-3 rounded border border-slate-200 bg-white p-2">
-            <p className="text-xs text-slate-500">초대 코드</p>
-            <button
-              className="mt-1 font-mono text-sm font-semibold underline-offset-2 hover:text-teal-700 hover:underline"
-              onClick={copyInviteCode}
-              title="초대 코드 복사"
-            >
-              {group.invite_code}
-            </button>
-            <button
-              className="mt-2 w-full rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:text-slate-400"
-              disabled={group.role !== "OWNER"}
-              onClick={regenerateInviteCode}
-            >
-              초대 코드 새로 만들기
-            </button>
-          </div>
+          {(group.role === "OWNER" || group.can_edit_schedule === 1) && (
+            <div className="mt-3 rounded border border-slate-200 bg-white p-2">
+              <p className="text-xs text-slate-500">초대 코드</p>
+              <button
+                className="mt-1 font-mono text-sm font-semibold underline-offset-2 hover:text-teal-700 hover:underline"
+                onClick={copyInviteCode}
+                title="초대 코드 복사"
+              >
+                {group.invite_code}
+              </button>
+              <button
+                className="mt-2 w-full rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:text-slate-400"
+                disabled={group.role !== "OWNER"}
+                onClick={regenerateInviteCode}
+              >
+                초대 코드 새로 만들기
+              </button>
+            </div>
+          )}
           <div className="mt-3 grid gap-2">
             <button
               className="rounded border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 disabled:text-slate-400"
@@ -1850,8 +2039,7 @@ function ManagePanel({
   members,
   schedules,
   canManage,
-  onChanged,
-  onNotice
+  onChanged
 }: {
   user: User;
   group: Group;
@@ -1859,7 +2047,6 @@ function ManagePanel({
   schedules: Schedule[];
   canManage: boolean;
   onChanged: () => void;
-  onNotice: (notice: Notice) => void;
 }) {
   const [form, setForm] = useState<ScheduleFormState>(emptyScheduleForm);
   const [showScheduleForm, setShowScheduleForm] = useState(false);
@@ -1892,9 +2079,8 @@ function ManagePanel({
       setShowScheduleForm(false);
       setForm({ ...emptyScheduleForm, target_user_id: form.target_user_id });
       await onChanged();
-      onNotice({ tone: "good", text: editingScheduleId ? "복약 스케줄이 수정되었습니다." : "복약 스케줄이 추가되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "스케줄 저장에 실패했습니다." });
+      showActionError(error, "스케줄 저장에 실패했습니다.");
     }
   }
 
@@ -1932,15 +2118,14 @@ function ManagePanel({
         cancelEdit();
       }
       await onChanged();
-      onNotice({ tone: "good", text: "복약 스케줄이 삭제되었습니다." });
     } catch (error) {
-      onNotice({ tone: "warn", text: error instanceof Error ? error.message : "스케줄 삭제에 실패했습니다." });
+      showActionError(error, "스케줄 삭제에 실패했습니다.");
     }
   }
 
   return (
     <section>
-      <div className="flex h-[430px] flex-col rounded border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex max-h-[calc(100dvh-220px)] min-h-[360px] flex-col rounded border border-slate-200 bg-white p-3 shadow-sm sm:h-[430px] sm:max-h-none sm:p-4">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ClipboardList size={20} className="text-teal-700" />
@@ -1961,7 +2146,7 @@ function ManagePanel({
         ) : showScheduleForm ? (
           <form className="grid min-h-0 gap-3 overflow-y-auto rounded border border-slate-200 bg-slate-50 p-3 md:grid-cols-2" onSubmit={submit}>
             <select
-              className="rounded border border-slate-300 px-3 py-2"
+              className="min-w-0 rounded border border-slate-300 px-3 py-2"
               value={form.target_user_id}
               onChange={(event) => setForm({ ...form, target_user_id: event.target.value })}
             >
@@ -1972,19 +2157,19 @@ function ManagePanel({
               ))}
             </select>
             <input
-              className="rounded border border-slate-300 px-3 py-2"
+              className="min-w-0 rounded border border-slate-300 px-3 py-2"
               placeholder="약 이름"
               value={form.medicine_name}
               onChange={(event) => setForm({ ...form, medicine_name: event.target.value })}
             />
             <input
-              className="rounded border border-slate-300 px-3 py-2"
+              className="min-w-0 rounded border border-slate-300 px-3 py-2"
               placeholder="복용량"
               value={form.dosage}
               onChange={(event) => setForm({ ...form, dosage: event.target.value })}
             />
             <input
-              className="rounded border border-slate-300 px-3 py-2"
+              className="min-w-0 rounded border border-slate-300 px-3 py-2"
               type="time"
               value={form.intake_time}
               onChange={(event) => setForm({ ...form, intake_time: event.target.value })}
@@ -2042,22 +2227,22 @@ function ManagePanel({
           </form>
         ) : null}
         {!showScheduleForm && (
-          <div className="max-h-[312px] space-y-2 overflow-y-auto pr-1">
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 sm:max-h-[312px]">
             {schedules.length === 0 && (
               <p className="rounded bg-slate-50 p-3 text-sm text-slate-500">등록된 스케줄이 없습니다.</p>
             )}
             {schedules.map((schedule) => (
               <div
                 key={schedule.id}
-                className="grid min-h-[72px] gap-3 border-t border-slate-100 py-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+                className="grid min-h-[72px] gap-2 border-t border-slate-100 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-3"
               >
-                <div>
-                  <p className="font-medium">{schedule.medicine_name}</p>
-                  <p className="text-sm text-slate-500">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{schedule.medicine_name}</p>
+                  <p className="break-keep text-sm text-slate-500">
                     {schedule.target_user_name} · {schedule.intake_time} · {schedule.days_of_week} · {schedule.escalation_minutes ?? 30}분 뒤 알림
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-end gap-2 sm:justify-start">
                   <span className="text-sm text-slate-500">{schedule.is_active ? "활성" : "중지"}</span>
                   {canManage && (
                     <>

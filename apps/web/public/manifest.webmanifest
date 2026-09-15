@@ -1,7 +1,9 @@
 {
   "name": "PillMate",
   "short_name": "PillMate",
+  "description": "가족과 함께 복약 알림을 확인하는 PillMate",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f8fafc",
   "theme_color": "#0f766e",

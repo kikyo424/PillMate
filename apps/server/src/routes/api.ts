@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import multer from "multer";
 import type { Server } from "socket.io";
+import { config } from "../config.js";
 import { db, runTransaction } from "../db/connection.js";
 import type { GroupRow, ScheduleRow } from "../db/types.js";
 import { asyncHandler, HttpError } from "../http/errors.js";
@@ -17,6 +18,7 @@ import {
 import { buildScheduledTime, getLocalDayBounds, getTodayCode } from "../utils/dates.js";
 import { createSystemFeedMessage } from "../services/feed.js";
 import { sendPushToGroup } from "../services/notifications.js";
+import { buildChatNotification, buildMedicationCompletedNotification } from "../services/pushMessages.js";
 import { runMedicationSchedulerTick } from "../services/scheduler.js";
 import { createInviteCode } from "../utils/inviteCode.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
@@ -117,7 +119,7 @@ function createVerificationFeed(
   const medicineText = `${schedule.medicine_name} ${schedule.dosage}`.trim();
   const content =
     verificationType === "PHOTO"
-      ? `${displayName}님이 ${medicineText} 복약을 사진으로 인증했습니다.`
+      ? `${displayName}님이 ${medicineText}을 사진으로 인증했습니다.`
       : `${displayName}님이 ${medicineText} 복약을 완료했습니다.`;
 
   return createSystemFeedMessage(io, schedule.group_id, content, photoUrl);
@@ -178,8 +180,8 @@ export function createApiRouter(io: Server) {
     "/push/vapid-public-key",
     asyncHandler((_req, res) => {
       res.json({
-        enabled: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY),
-        publicKey: process.env.VAPID_PUBLIC_KEY ?? null
+        enabled: Boolean(config.vapidPublicKey && config.vapidPrivateKey),
+        publicKey: config.vapidPublicKey ?? null
       });
     })
   );
@@ -717,8 +719,11 @@ export function createApiRouter(io: Server) {
       const displayName = getGroupDisplayName(schedule.group_id, authedReq.user.id, authedReq.user.name);
 
       await sendPushToGroup(schedule.group_id, {
-        title: "복약 완료",
-        body: `${displayName}님이 ${schedule.medicine_name} ${schedule.dosage} 복약을 완료했습니다.`,
+        ...buildMedicationCompletedNotification({
+          displayName,
+          medicineName: schedule.medicine_name,
+          dosage: schedule.dosage
+        }),
         kind: "INTAKE_COMPLETED",
         url: "/"
       });
@@ -769,13 +774,13 @@ export function createApiRouter(io: Server) {
         )
         .get(Number(result.lastInsertRowid));
       const displayName = getGroupDisplayName(groupId, authedReq.user.id, authedReq.user.name);
+      const groupName = (db.prepare("SELECT name FROM groups WHERE id = ?").get(groupId) as { name: string } | undefined)?.name;
 
       io.to(`group:${groupId}`).emit("chat:message", message);
       await sendPushToGroup(
         groupId,
         {
-          title: `${displayName}님의 새 메시지`,
-          body: content,
+          ...buildChatNotification({ groupName, displayName, content }),
           kind: "CHAT_MESSAGE",
           url: "/"
         },
